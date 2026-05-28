@@ -1,41 +1,113 @@
+import { type AgentStreamEventType } from '@lobechat/agent-gateway-client';
 import { type ChatToolPayload } from '@lobechat/types';
 import debug from 'debug';
 import { type Redis } from 'ioredis';
 
 import { getAgentRuntimeRedisClient } from './redis';
+import { type PublishAgentRuntimeEndParams } from './types';
 
 const log = debug('lobe-server:agent-runtime:stream-event-manager');
 const timing = debug('lobe-server:agent-runtime:timing');
 
-const getDefaultReasonDetail = (finalState: any, reason?: string): string => {
+const extractReasonFromError = (error: any): string | undefined => {
+  if (!error) return undefined;
+
+  // ChatMessageError format: { body: { error: { message } }, message, type }
+  if (error.body?.error?.message) return error.body.error.message;
+  if (error.body?.message) return error.body.message;
+
+  // ChatCompletionErrorPayload format: { error: { message }, errorType }
+  if (error.error?.error?.message) return error.error.error.message;
+  if (error.error?.message) return error.error.message;
+
+  // Direct message (skip "[object Object]")
+  if (error.message && error.message !== '[object Object]' && error.message !== 'error') {
+    return error.message;
+  }
+
+  return error.type || error.errorType || undefined;
+};
+
+export const getDefaultReasonDetail = (finalState: any, reason?: string): string => {
   if (reason === 'error') {
-    return finalState?.error?.message || finalState?.error?.type || 'Agent runtime failed';
+    return extractReasonFromError(finalState?.error) || 'Agent runtime failed';
   }
 
   if (reason === 'interrupted') {
-    return finalState?.error?.message || 'Agent runtime interrupted';
+    return extractReasonFromError(finalState?.error) || 'Agent runtime interrupted';
   }
 
   return 'Agent runtime completed successfully';
 };
 
+/**
+ * Drop reconstructible / heavy fields from an `AgentState` before
+ * serializing it into a Redis stream event. `messages` is the size
+ * driver — long topics with `compressedGroup` envelopes can push a
+ * single `xadd` past Upstash's 10 MB request limit, manifesting on
+ * the gateway as a misleading watchdog "Operation idle" timeout.
+ *
+ * The dropped fields are all reconstructible:
+ *
+ * - `messages` — canonical copy lives in the DB (UIChatMessage rows)
+ *   and the runtime in-memory state; in-process consumers that need
+ *   it (e.g. `execSubAgentTask.onComplete`) receive the full state
+ *   via the local `HookContext` channel, not via the stream.
+ * - `operationToolSet`, `toolManifestMap`, `toolSourceMap`, `tools`
+ *   — operation-level snapshot; back-compat copies of one struct.
+ *
+ * Mirrors the `done`-event strip in `OperationTraceRecorder.appendStep`;
+ * keep the two lists in sync if either set changes.
+ */
+const stripStateForStream = <T extends Record<string, any>>(
+  state: T | undefined,
+): T | undefined => {
+  if (!state) return state;
+  const {
+    messages: _messages,
+    operationToolSet: _operationToolSet,
+    toolManifestMap: _toolManifestMap,
+    toolSourceMap: _toolSourceMap,
+    tools: _tools,
+    ...rest
+  } = state;
+  return rest as T;
+};
+
+/**
+ * Chokepoint helper applied inside every stream-event publish site.
+ * If the event `data` carries a `finalState`, strip `messages` + the
+ * tool-set group off it (see `stripStateForStream` for the rationale).
+ *
+ * Centralizing the strip here means new callers — including direct
+ * `publishStreamEvent` users (e.g. `RuntimeExecutors`, the per-step
+ * publish in `AgentRuntimeService.executeStep`) — get the size
+ * protection automatically, with no per-site bookkeeping.
+ *
+ * Returns the original reference when no stripping is needed so the
+ * common path stays allocation-free.
+ */
+export const stripFinalStateInEventData = (data: unknown): unknown => {
+  if (!data || typeof data !== 'object') return data;
+  const record = data as Record<string, unknown>;
+  const finalState = record.finalState;
+  if (!finalState || typeof finalState !== 'object') return data;
+  return { ...record, finalState: stripStateForStream(finalState as Record<string, any>) };
+};
+
+/**
+ * Server-side stream event shape. Wire-compatible with `AgentStreamEvent` in
+ * `@lobechat/agent-gateway-client` (the type union is the single source of
+ * truth) — heterogeneous CLI agents that ingest via `aiAgent.heteroIngest`
+ * republish their events through this same manager unchanged.
+ */
 export interface StreamEvent {
   data: any;
   id?: string; // Redis Stream event ID
   operationId: string;
   stepIndex: number;
   timestamp: number;
-  type:
-    | 'agent_runtime_init'
-    | 'agent_runtime_end'
-    | 'stream_start'
-    | 'stream_chunk'
-    | 'stream_end'
-    | 'tool_start'
-    | 'tool_end'
-    | 'step_start'
-    | 'step_complete'
-    | 'error';
+  type: AgentStreamEventType;
 }
 
 export interface StreamChunkData {
@@ -86,6 +158,11 @@ export class StreamEventManager {
 
     const eventData: StreamEvent = {
       ...event,
+      // Chokepoint strip — every event passing through here gets its
+      // `data.finalState` trimmed (messages + tool-set fields) before
+      // serialization so a single xadd can't blow past Upstash's 10 MB
+      // request limit on long topics.
+      data: stripFinalStateInEventData(event.data),
       operationId,
       timestamp: Date.now(),
     };
@@ -166,13 +243,18 @@ export class StreamEventManager {
   /**
    * Publish Agent runtime end event
    */
-  async publishAgentRuntimeEnd(
-    operationId: string,
-    stepIndex: number,
-    finalState: any,
-    reason?: string,
-    reasonDetail?: string,
-  ): Promise<string> {
+  async publishAgentRuntimeEnd({
+    operationId,
+    stepIndex,
+    finalState,
+    reason,
+    reasonDetail,
+    uiMessages,
+  }: PublishAgentRuntimeEndParams): Promise<string> {
+    // `finalState.messages` + tool-set fields are stripped centrally
+    // inside `publishStreamEvent`; callers stay dumb. `reasonDetail`
+    // derivation below uses the un-stripped in-process `finalState`
+    // so the error message remains available.
     return this.publishStreamEvent(operationId, {
       data: {
         finalState,
@@ -180,6 +262,7 @@ export class StreamEventManager {
         phase: 'execution_complete',
         reason: reason || 'completed',
         reasonDetail: reasonDetail || getDefaultReasonDetail(finalState, reason),
+        ...(uiMessages !== undefined && { uiMessages }),
       },
       stepIndex,
       type: 'agent_runtime_end',

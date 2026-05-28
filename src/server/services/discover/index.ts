@@ -20,6 +20,7 @@ import {
   type DiscoverPluginItem,
   type DiscoverProviderDetail,
   type DiscoverProviderItem,
+  type DiscoverSkillItem,
   type DiscoverUserProfile,
   type IdentifiersResponse,
   type McpListResponse,
@@ -63,6 +64,7 @@ import dayjs from 'dayjs';
 import debug from 'debug';
 import { cloneDeep, countBy, isString, merge, uniq, uniqBy } from 'es-toolkit/compat';
 import matter from 'gray-matter';
+import { isAiModelVisible } from 'model-bank';
 import urlJoin from 'url-join';
 
 import { type TrustedClientUserInfo } from '@/libs/trusted-client';
@@ -72,6 +74,11 @@ import { PluginStore } from '@/server/modules/PluginStore';
 import { MarketService } from '@/server/services/market';
 
 const log = debug('lobe-server:discover');
+
+const loadBuiltinModels = async () => {
+  const { loadModels } = await import('@/business/client/model-bank/loadModels');
+  return loadModels();
+};
 
 export interface DiscoverServiceOptions {
   /** Access token from OIDC flow (legacy) */
@@ -1290,13 +1297,15 @@ export class DiscoverService {
 
   private _getProviderList = async (): Promise<DiscoverProviderItem[]> => {
     log('_getProviderList: fetching provider list');
-    const [{ LOBE_DEFAULT_MODEL_LIST }, { DEFAULT_MODEL_PROVIDER_LIST }] = await Promise.all([
-      import('model-bank'),
+    const [builtinModels, { DEFAULT_MODEL_PROVIDER_LIST }] = await Promise.all([
+      loadBuiltinModels(),
       import('model-bank/modelProviders'),
     ]);
     const result = DEFAULT_MODEL_PROVIDER_LIST.map((item) => {
       const models = uniq(
-        LOBE_DEFAULT_MODEL_LIST.filter((m) => m.providerId === item.id).map((m) => m.id),
+        builtinModels
+          .filter((m) => m.providerId === item.id && isAiModelVisible(m))
+          .map((m) => m.id),
       );
       const provider = {
         ...item,
@@ -1317,7 +1326,7 @@ export class DiscoverService {
   }): Promise<DiscoverProviderDetail | undefined> => {
     log('getProviderDetail: params=%O', params);
     const { identifier, locale, withReadme } = params;
-    const { LOBE_DEFAULT_MODEL_LIST } = await import('model-bank');
+    const builtinModels = await loadBuiltinModels();
     const all = await this._getProviderList();
     const provider = all.find((item) => item.identifier === identifier);
     if (!provider) {
@@ -1363,7 +1372,7 @@ export class DiscoverService {
     const result = {
       ...provider,
       models: uniqBy(
-        LOBE_DEFAULT_MODEL_LIST.filter((m) => m.providerId === provider.id),
+        builtinModels.filter((m) => m.providerId === provider.id && isAiModelVisible(m)),
         (item) => item.id,
       ),
       readme,
@@ -1453,16 +1462,19 @@ export class DiscoverService {
 
   private _getRawModelList = async (): Promise<DiscoverModelItem[]> => {
     log('_getRawModelList: fetching raw model list');
-    const { LOBE_DEFAULT_MODEL_LIST } = await import('model-bank');
-    const result = LOBE_DEFAULT_MODEL_LIST.map((item) => {
+    const builtinModels = await loadBuiltinModels();
+    const visibleModels = builtinModels.filter(isAiModelVisible);
+    const result = visibleModels.map((item) => {
       const identifier = (item.id.split('/').at(-1) || item.id).toLowerCase();
       const providers = uniq(
-        LOBE_DEFAULT_MODEL_LIST.filter(
-          (m) =>
-            m.id.toLowerCase() === identifier ||
-            m.id.includes(`/${identifier}`) ||
-            m.displayName?.toLowerCase() === item.displayName?.toLowerCase(),
-        ).map((m) => m.providerId),
+        visibleModels
+          .filter(
+            (m) =>
+              m.id.toLowerCase() === identifier ||
+              m.id.includes(`/${identifier}`) ||
+              m.displayName?.toLowerCase() === item.displayName?.toLowerCase(),
+          )
+          .map((m) => m.providerId),
       );
       const model = {
         ...item,
@@ -1546,8 +1558,8 @@ export class DiscoverService {
   getModelCategories = async (params: CategoryListQuery = {}): Promise<CategoryItem[]> => {
     log('getModelCategories: params=%O', params);
     const { q } = params;
-    const { LOBE_DEFAULT_MODEL_LIST } = await import('model-bank');
-    let list = LOBE_DEFAULT_MODEL_LIST;
+    const builtinModels = await loadBuiltinModels();
+    let list = builtinModels.filter(isAiModelVisible);
     if (q) {
       const originalCount = list.length;
       list = list.filter((item) => {
@@ -1580,8 +1592,8 @@ export class DiscoverService {
     identifier: string;
   }): Promise<DiscoverModelDetail | undefined> => {
     log('getModelDetail: params=%O', params);
-    const [{ LOBE_DEFAULT_MODEL_LIST }, { DEFAULT_MODEL_PROVIDER_LIST }] = await Promise.all([
-      import('model-bank'),
+    const [builtinModels, { DEFAULT_MODEL_PROVIDER_LIST }] = await Promise.all([
+      loadBuiltinModels(),
       import('model-bank/modelProviders'),
     ]);
     const { identifier } = params;
@@ -1614,7 +1626,8 @@ export class DiscoverService {
       ...model,
       providers: providers.map((item) => ({
         ...item,
-        model: LOBE_DEFAULT_MODEL_LIST.find((m) => {
+        model: builtinModels.find((m) => {
+          if (!isAiModelVisible(m)) return false;
           if (m.providerId !== item.id) return false;
           return (
             m.id.toLowerCase() === model.identifier.toLowerCase() ||
@@ -1793,6 +1806,8 @@ export class DiscoverService {
         favoriteAgents?: any[];
         forkedAgentGroups?: any[];
         forkedAgents?: any[];
+        plugins?: any[];
+        skills?: any[];
       };
 
       if (!response?.user) {
@@ -1808,6 +1823,8 @@ export class DiscoverService {
         forkedAgentGroups,
         favoriteAgents,
         favoriteAgentGroups,
+        skills,
+        plugins,
       } = response;
 
       // Transform agents to DiscoverAssistantItem format
@@ -1950,6 +1967,53 @@ export class DiscoverService {
         updatedAt: group.updatedAt,
       }));
 
+      // Transform skills to DiscoverSkillItem format
+      const transformedSkills: DiscoverSkillItem[] = (skills || []).map((skill: any) => ({
+        author: skill.author || '',
+        category: skill.category,
+        commentCount: skill.commentCount,
+        createdAt: skill.createdAt,
+        description: skill.description || '',
+        github: skill.github,
+        homepage: skill.homepage,
+        icon: skill.icon,
+        identifier: skill.identifier,
+        installCount: skill.installCount || 0,
+        isFeatured: skill.isFeatured || false,
+        isOfficial: skill.isOfficial || false,
+        isValidated: skill.isValidated || false,
+        name: skill.name || skill.identifier,
+        ratingAvg: skill.ratingAvg,
+        ratingCount: skill.ratingCount || 0,
+        resourcesCount: skill.resourcesCount,
+        status: skill.status,
+        tags: skill.tags || [],
+        updatedAt: skill.updatedAt,
+        version: skill.version || 'latest',
+      }));
+
+      // Transform plugins to DiscoverPluginItem format
+      const transformedPlugins: DiscoverPluginItem[] = (plugins || []).map((plugin: any) => ({
+        author: plugin.author || '',
+        avatar: plugin.avatar,
+        category: plugin.category,
+        createdAt: plugin.createdAt,
+        description: plugin.description || '',
+        homepage: `https://lobehub.com/discover/plugin/${plugin.identifier}`,
+        identifier: plugin.identifier,
+        installCount: plugin.installCount || 0,
+        isClaimed: plugin.isClaimed || false,
+        isFeatured: plugin.isFeatured || false,
+        isOfficial: plugin.isOfficial || false,
+        isValidated: plugin.isValidated || false,
+        manifest: plugin.manifest || '',
+        schemaVersion: 1,
+        status: plugin.status,
+        tags: plugin.tags || [],
+        title: plugin.name || plugin.identifier,
+        updatedAt: plugin.updatedAt,
+      }));
+
       const result: DiscoverUserProfile = {
         agentGroups: transformedAgentGroups,
         agents: transformedAgents,
@@ -1957,6 +2021,8 @@ export class DiscoverService {
         favoriteAgents: transformedFavoriteAgents,
         forkedAgentGroups: transformedForkedAgentGroups,
         forkedAgents: transformedForkedAgents,
+        plugins: transformedPlugins,
+        skills: transformedSkills,
         user: {
           avatarUrl: user.avatarUrl || null,
           bannerUrl: user.meta?.bannerUrl || null,
@@ -1974,13 +2040,15 @@ export class DiscoverService {
       };
 
       log(
-        'getUserInfo: returning user profile with %d agents, %d groups, %d forked agents, %d forked groups, %d favorite agents, %d favorite groups',
+        'getUserInfo: returning user profile with %d agents, %d groups, %d forked agents, %d forked groups, %d favorite agents, %d favorite groups, %d skills, %d plugins',
         result.agents.length,
         result.agentGroups?.length || 0,
         result.forkedAgents?.length || 0,
         result.forkedAgentGroups?.length || 0,
         result.favoriteAgents?.length || 0,
         result.favoriteAgentGroups?.length || 0,
+        result.skills?.length || 0,
+        result.plugins?.length || 0,
       );
       return result;
     } catch (error) {

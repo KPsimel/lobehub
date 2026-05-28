@@ -1,25 +1,35 @@
 'use client';
 
-import { ScrollArea } from '@lobehub/ui';
-import { startTransition, useCallback, useEffect, useRef } from 'react';
+import { useWatchBroadcast } from '@lobechat/electron-client-ipc';
+import { ActionIcon, ScrollArea } from '@lobehub/ui';
+import { cx } from 'antd-style';
+import { Plus } from 'lucide-react';
+import { startTransition, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
-import { pluginRegistry } from '@/features/Electron/titlebar/RecentlyViewed/plugins';
+import { electronSystemService } from '@/services/electron/system';
+import { desktopRoutes } from '@/spa/router/desktopRouter.config';
+import { type NewTabAction } from '@/spa/router/routeMeta';
 import { useElectronStore } from '@/store/electron';
+import { electronStylish } from '@/styles/electron';
 
 import { useResolvedTabs } from './hooks/useResolvedTabs';
+import { matchRouteMeta } from './resolveRouteMeta';
 import { useStyles } from './styles';
 import TabItem from './TabItem';
 
 const TAB_WIDTH = 180;
-const TAB_GAP = 2;
+const TAB_GAP = 0;
 
 const TabBar = () => {
   const styles = useStyles;
   const navigate = useNavigate();
+  const { t } = useTranslation('electron');
   const viewportRef = useRef<HTMLDivElement>(null);
   const { tabs, activeTabId } = useResolvedTabs();
   const activateTab = useElectronStore((s) => s.activateTab);
+  const addTab = useElectronStore((s) => s.addTab);
   const removeTab = useElectronStore((s) => s.removeTab);
   const closeOtherTabs = useElectronStore((s) => s.closeOtherTabs);
   const closeLeftTabs = useElectronStore((s) => s.closeLeftTabs);
@@ -27,28 +37,21 @@ const TabBar = () => {
 
   const handleActivate = useCallback(
     (id: string, url: string) => {
-      // Prioritize updating the Tab activation state (high priority)
       activateTab(id);
-      const tab = tabs.find((t) => t.reference.id === id);
-      if (tab) pluginRegistry.onActivate(tab.reference);
-      // Degrade route navigation to startTransition (low priority)
       startTransition(() => navigate(url));
     },
-    [activateTab, navigate, tabs],
+    [activateTab, navigate],
   );
 
   const navigateToActive = useCallback(() => {
     const { activeTabId: newActiveId, tabs: newTabs } = useElectronStore.getState();
     if (newActiveId) {
-      const target = newTabs.find((t) => t.id === newActiveId);
-      if (target) {
-        const resolved = tabs.find((t) => t.reference.id === newActiveId);
-        if (resolved) navigate(resolved.url);
-      }
+      const target = newTabs.find((tab) => tab.id === newActiveId);
+      if (target) navigate(target.url);
     } else {
       navigate('/');
     }
-  }, [tabs, navigate]);
+  }, [navigate]);
 
   const handleClose = useCallback(
     (id: string) => {
@@ -57,10 +60,8 @@ const TabBar = () => {
 
       startTransition(() => {
         if (isActive && nextActiveId) {
-          const nextTab = tabs.find((t) => t.reference.id === nextActiveId);
-          if (nextTab) {
-            navigate(nextTab.url);
-          }
+          const nextTab = tabs.find((tab) => tab.tab.id === nextActiveId);
+          if (nextTab) navigate(nextTab.tab.url);
         }
 
         if (!nextActiveId) {
@@ -75,8 +76,8 @@ const TabBar = () => {
     (id: string) => {
       closeOtherTabs(id);
       startTransition(() => {
-        const target = tabs.find((t) => t.reference.id === id);
-        if (target) navigate(target.url);
+        const target = tabs.find((tab) => tab.tab.id === id);
+        if (target) navigate(target.tab.url);
       });
     },
     [closeOtherTabs, tabs, navigate],
@@ -102,7 +103,7 @@ const TabBar = () => {
     const viewport = viewportRef.current;
     if (!viewport || !activeTabId) return;
 
-    const activeIndex = tabs.findIndex((t) => t.reference.id === activeTabId);
+    const activeIndex = tabs.findIndex((tab) => tab.tab.id === activeTabId);
     if (activeIndex < 0) return;
 
     const tabLeft = activeIndex * (TAB_WIDTH + TAB_GAP);
@@ -116,7 +117,43 @@ const TabBar = () => {
     }
   }, [activeTabId, tabs]);
 
-  if (tabs.length < 2) return null;
+  const newTabAction: NewTabAction | null = useMemo(() => {
+    if (!activeTabId) return null;
+    const activeTab = tabs.find((tab) => tab.tab.id === activeTabId);
+    if (!activeTab) return null;
+
+    const matched = matchRouteMeta(desktopRoutes, activeTab.tab.url);
+    return matched.meta?.createNewTab?.(matched.params) ?? null;
+  }, [activeTabId, tabs]);
+
+  useWatchBroadcast('closeCurrentTabOrWindow', () => {
+    if (tabs.length > 1 && activeTabId) {
+      handleClose(activeTabId);
+    } else {
+      void electronSystemService.closeWindow();
+    }
+  });
+
+  const handleNewTab = useCallback(async () => {
+    if (!newTabAction) return;
+    let result;
+    try {
+      result = await newTabAction.onCreate();
+    } catch (error) {
+      console.error('[TabBar] failed to create new tab:', error);
+      return;
+    }
+    if (!result) return;
+
+    addTab(result.url, result.cached, true);
+    startTransition(() => navigate(result.url));
+  }, [newTabAction, addTab, navigate]);
+
+  useWatchBroadcast('createNewTab', () => {
+    void handleNewTab();
+  });
+
+  if (tabs.length === 0) return null;
 
   return (
     <ScrollArea
@@ -129,9 +166,9 @@ const TabBar = () => {
       {tabs.map((tab, index) => (
         <TabItem
           index={index}
-          isActive={tab.reference.id === activeTabId}
+          isActive={tab.tab.id === activeTabId}
           item={tab}
-          key={tab.reference.id}
+          key={tab.tab.id}
           totalCount={tabs.length}
           onActivate={handleActivate}
           onClose={handleClose}
@@ -140,6 +177,15 @@ const TabBar = () => {
           onCloseRight={handleCloseRight}
         />
       ))}
+      {newTabAction && (
+        <ActionIcon
+          className={cx(electronStylish.nodrag, styles.newTabButton)}
+          icon={Plus}
+          size="small"
+          title={t('tab.newTab')}
+          onClick={handleNewTab}
+        />
+      )}
     </ScrollArea>
   );
 };

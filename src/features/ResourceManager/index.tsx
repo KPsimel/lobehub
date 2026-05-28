@@ -1,6 +1,5 @@
 'use client';
 
-import { BRANDING_NAME } from '@lobechat/business-const';
 import { Flexbox } from '@lobehub/ui';
 import { createStaticStyles, useTheme } from 'antd-style';
 import { memo, useCallback, useEffect, useMemo } from 'react';
@@ -9,6 +8,7 @@ import { useSearchParams } from 'react-router-dom';
 import DragUploadZone from '@/components/DragUploadZone';
 import { PageEditor } from '@/features/PageEditor';
 import dynamic from '@/libs/next/dynamic';
+import { useCurrentFolderId } from '@/routes/(main)/resource/features/hooks/useCurrentFolderId';
 import { useResourceManagerStore } from '@/routes/(main)/resource/features/store';
 import { documentService } from '@/services/document';
 import { useFileStore } from '@/store/file';
@@ -59,12 +59,12 @@ export type ResourceManagerMode = 'editor' | 'explorer' | 'page';
 const ResourceManager = memo(() => {
   const theme = useTheme();
   const [, setSearchParams] = useSearchParams();
-  const [mode, currentViewItemId, libraryId, currentFolderId, setMode, setCurrentViewItemId] =
+  const currentFolderId = useCurrentFolderId();
+  const [mode, currentViewItemId, libraryId, setMode, setCurrentViewItemId] =
     useResourceManagerStore((s) => [
       s.mode,
       s.currentViewItemId,
       s.libraryId,
-      s.currentFolderId,
       s.setMode,
       s.setCurrentViewItemId,
     ]);
@@ -108,8 +108,6 @@ const ResourceManager = memo(() => {
       prev.delete('file');
       return prev;
     });
-    // Reset document title to default
-    document.title = BRANDING_NAME;
   };
 
   // Optimistic update handlers for page title and emoji

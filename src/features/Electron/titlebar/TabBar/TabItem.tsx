@@ -1,20 +1,29 @@
 'use client';
 
-import { ActionIcon, ContextMenuTrigger, Flexbox, type GenericItemType, Icon } from '@lobehub/ui';
+import {
+  ActionIcon,
+  Avatar,
+  ContextMenuTrigger,
+  Flexbox,
+  type GenericItemType,
+  Icon,
+} from '@lobehub/ui';
 import { cx } from 'antd-style';
 import { X } from 'lucide-react';
 import { memo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { type ResolvedPageData } from '@/features/Electron/titlebar/RecentlyViewed/types';
 import { electronStylish } from '@/styles/electron';
 
+import { type ResolvedTab } from './hooks/useResolvedTabs';
+import { useTabRunning } from './hooks/useTabRunning';
+import { useTabUnread } from './hooks/useTabUnread';
 import { useStyles } from './styles';
 
 interface TabItemProps {
   index: number;
   isActive: boolean;
-  item: ResolvedPageData;
+  item: ResolvedTab;
   onActivate: (id: string, url: string) => void;
   onClose: (id: string) => void;
   onCloseLeft: (id: string) => void;
@@ -37,13 +46,17 @@ const TabItem = memo<TabItemProps>(
   }) => {
     const styles = useStyles;
     const { t } = useTranslation('electron');
-    const id = item.reference.id;
+    const id = item.tab.id;
+    const { meta, tab } = item;
+    const isRunning = useTabRunning(tab);
+    const isUnread = useTabUnread(tab);
+    const showUnreadDot = !isRunning && isUnread;
 
     const handleClick = useCallback(() => {
       if (!isActive) {
-        onActivate(id, item.url);
+        onActivate(id, tab.url);
       }
-    }, [isActive, onActivate, id, item.url]);
+    }, [isActive, onActivate, id, tab.url]);
 
     const handleClose = useCallback(
       (e: React.MouseEvent) => {
@@ -88,17 +101,35 @@ const TabItem = memo<TabItemProps>(
           horizontal
           align="center"
           className={cx(electronStylish.nodrag, styles.tab, isActive && styles.tabActive)}
+          data-active={isActive ? 'true' : undefined}
           gap={6}
           onClick={handleClick}
         >
-          {item.icon && <Icon className={styles.tabIcon} icon={item.icon} size="small" />}
-          <span className={styles.tabTitle}>{item.title}</span>
-          <ActionIcon
-            className={cx('closeIcon', styles.closeIcon)}
-            icon={X}
-            size="small"
-            onClick={handleClose}
-          />
+          {meta.avatar ? (
+            <span className={styles.avatarWrapper}>
+              <Avatar
+                emojiScaleWithBackground
+                avatar={meta.avatar}
+                background={meta.backgroundColor}
+                shape="square"
+                size={16}
+              />
+              {isRunning && <span aria-label={t('tab.running')} className={styles.runningDot} />}
+              {showUnreadDot && <span aria-label={t('tab.unread')} className={styles.unreadDot} />}
+            </span>
+          ) : (
+            meta.icon && (
+              <span className={styles.avatarWrapper}>
+                <Icon className={styles.tabIcon} icon={meta.icon} size="small" />
+                {isRunning && <span aria-label={t('tab.running')} className={styles.runningDot} />}
+                {showUnreadDot && (
+                  <span aria-label={t('tab.unread')} className={styles.unreadDot} />
+                )}
+              </span>
+            )
+          )}
+          <span className={styles.tabTitle}>{meta.title}</span>
+          <ActionIcon className={styles.closeIcon} icon={X} size="small" onClick={handleClose} />
         </Flexbox>
       </ContextMenuTrigger>
     );

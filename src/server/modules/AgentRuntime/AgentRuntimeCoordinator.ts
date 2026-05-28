@@ -1,4 +1,5 @@
 import { type AgentState } from '@lobechat/agent-runtime';
+import { type UIChatMessage } from '@lobechat/types';
 import debug from 'debug';
 
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
@@ -7,14 +8,29 @@ import { type IAgentStateManager, type IStreamEventManager } from './types';
 
 const log = debug('lobe-server:agent-runtime:coordinator');
 
-const TERMINAL_STATUSES = new Set<AgentState['status']>(['done', 'error', 'interrupted']);
+/**
+ * Statuses that end the event stream for the current operationId.
+ *
+ * `done` / `error` / `interrupted` are genuinely terminal — the op cannot
+ * resume. `waiting_for_human` is *stream-terminal but state-resumable*:
+ * the paused state lives on until a resume op (carrying the user's
+ * decision) starts, but that resume runs under a **new** operationId with
+ * its own event stream. For the paused operationId no further events will
+ * arrive, so clients should stop waiting the same way they do on done.
+ */
+const STREAM_END_STATUSES = new Set<AgentState['status']>([
+  'done',
+  'error',
+  'interrupted',
+  'waiting_for_human',
+]);
 
-const hasEnteredTerminalState = (
+const hasEnteredStreamEndState = (
   previousStatus?: AgentState['status'],
   nextStatus?: AgentState['status'],
-): nextStatus is 'done' | 'error' | 'interrupted' => {
-  const wasTerminal = previousStatus ? TERMINAL_STATUSES.has(previousStatus) : false;
-  return Boolean(nextStatus && TERMINAL_STATUSES.has(nextStatus) && !wasTerminal);
+): nextStatus is 'done' | 'error' | 'interrupted' | 'waiting_for_human' => {
+  const wasStreamEnd = previousStatus ? STREAM_END_STATUSES.has(previousStatus) : false;
+  return Boolean(nextStatus && STREAM_END_STATUSES.has(nextStatus) && !wasStreamEnd);
 };
 
 export interface AgentRuntimeCoordinatorOptions {
@@ -28,6 +44,17 @@ export interface AgentRuntimeCoordinatorOptions {
    * Defaults to automatic selection based on Redis availability
    */
   streamEventManager?: IStreamEventManager;
+  /**
+   * Resolve the canonical UIChatMessage[] snapshot for a terminal-state
+   * agent run, attached to `agent_runtime_end` events so the client can
+   * use the pushed payload as Source of Truth instead of refetching from
+   * DB.
+   *
+   * Optional: when omitted (e.g. tests, embedded usage without DB access)
+   * the coordinator falls back to publishing without `uiMessages` and the
+   * client behaves as before.
+   */
+  uiMessagesResolver?: (state: AgentState) => Promise<UIChatMessage[] | undefined>;
 }
 
 /**
@@ -44,10 +71,12 @@ export interface AgentRuntimeCoordinatorOptions {
 export class AgentRuntimeCoordinator {
   private stateManager: IAgentStateManager;
   private streamEventManager: IStreamEventManager;
+  private uiMessagesResolver?: (state: AgentState) => Promise<UIChatMessage[] | undefined>;
 
   constructor(options?: AgentRuntimeCoordinatorOptions) {
     this.stateManager = options?.stateManager ?? createAgentStateManager();
     this.streamEventManager = options?.streamEventManager ?? createStreamEventManager();
+    this.uiMessagesResolver = options?.uiMessagesResolver;
   }
 
   /**
@@ -80,6 +109,34 @@ export class AgentRuntimeCoordinator {
   }
 
   /**
+   * Invoke the optional uiMessagesResolver and shield callers from its
+   * failures — stream-event publishing must never fail the surrounding
+   * save. Errors are logged and surfaced to the client as a missing field,
+   * which falls back to the legacy refresh path.
+   *
+   * Skip the resolve entirely when the run is moving into
+   * `interrupted`. The executor's per-step finalize at line 1078 of
+   * RuntimeExecutors only runs on the success path, so a mid-stream cancel
+   * leaves the assistant row as the LOADING_FLAT placeholder. Pushing that
+   * placeholder as SoT would clobber the client's in-memory streamed
+   * content. The executor's catch-block partial-finalize
+   * writes the real partial content asynchronously, but that update may
+   * not be durable by the time we publish — leaving the field undefined
+   * lets the client preserve its in-memory state (`gatewayEventHandler.ts`
+   * also skips the DB refetch fallback when reason='interrupted').
+   */
+  private async resolveUiMessages(state: AgentState): Promise<UIChatMessage[] | undefined> {
+    if (!this.uiMessagesResolver) return undefined;
+    if (state.status === 'interrupted') return undefined;
+    try {
+      return await this.uiMessagesResolver(state);
+    } catch (error) {
+      console.error('Failed to resolve uiMessages for agent_runtime_end:', error);
+      return undefined;
+    }
+  }
+
+  /**
    * Save Agent state and handle corresponding events
    */
   async saveAgentState(operationId: string, state: AgentState): Promise<void> {
@@ -90,13 +147,14 @@ export class AgentRuntimeCoordinator {
       await this.stateManager.saveAgentState(operationId, state);
 
       // Send a terminal event once the operation first enters a terminal state.
-      if (hasEnteredTerminalState(previousState?.status, state.status)) {
-        await this.streamEventManager.publishAgentRuntimeEnd(
+      if (hasEnteredStreamEndState(previousState?.status, state.status)) {
+        await this.streamEventManager.publishAgentRuntimeEnd({
+          finalState: state,
           operationId,
-          state.stepCount ?? previousState?.stepCount ?? 0,
-          state,
-          state.status,
-        );
+          reason: state.status,
+          stepIndex: state.stepCount ?? previousState?.stepCount ?? 0,
+          uiMessages: await this.resolveUiMessages(state),
+        });
         log('[%s] Agent runtime reached terminal state: %s', operationId, state.status);
       }
     } catch (error) {
@@ -117,13 +175,15 @@ export class AgentRuntimeCoordinator {
       await this.stateManager.saveStepResult(operationId, stepResult);
 
       // This ensures agent_runtime_end is sent after all step events.
-      if (hasEnteredTerminalState(previousState?.status, stepResult.newState.status)) {
-        await this.streamEventManager.publishAgentRuntimeEnd(
+      if (hasEnteredStreamEndState(previousState?.status, stepResult.newState.status)) {
+        await this.streamEventManager.publishAgentRuntimeEnd({
+          finalState: stepResult.newState,
           operationId,
-          stepResult.newState.stepCount ?? stepResult.stepIndex ?? previousState?.stepCount ?? 0,
-          stepResult.newState,
-          stepResult.newState.status,
-        );
+          reason: stepResult.newState.status,
+          stepIndex:
+            stepResult.newState.stepCount ?? stepResult.stepIndex ?? previousState?.stepCount ?? 0,
+          uiMessages: await this.resolveUiMessages(stepResult.newState),
+        });
         log(
           '[%s] Agent runtime reached terminal state after step result: %s',
           operationId,

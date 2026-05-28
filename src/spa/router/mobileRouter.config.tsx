@@ -1,11 +1,16 @@
 'use client';
 
-import { type RouteObject } from 'react-router-dom';
+import type { RouteObject } from 'react-router-dom';
 
 import {
   BusinessMobileRoutesWithMainLayout,
   BusinessMobileRoutesWithoutMainLayout,
 } from '@/business/client/BusinessMobileRoutes';
+import {
+  mobileAgentSettingsRouteMeta,
+  shareTopicRouteMeta,
+} from '@/features/RouteMeta/mobileRouteMeta';
+import { agentRouteMeta } from '@/routes/(main)/agent/features/routeMeta';
 import { dynamicElement, dynamicLayout, ErrorBoundary, redirectElement } from '@/utils/router';
 
 // Mobile router configuration (declarative mode)
@@ -23,13 +28,23 @@ export const mobileRoutes: RouteObject[] = [
             children: [
               {
                 element: dynamicElement(() => import('@/routes/(mobile)/chat'), 'Mobile > Chat'),
+                handle: { meta: agentRouteMeta },
                 index: true,
+              },
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(mobile)/chat'),
+                  'Mobile > Chat > Topic',
+                ),
+                handle: { meta: agentRouteMeta },
+                path: ':topicId',
               },
               {
                 element: dynamicElement(
                   () => import('@/routes/(mobile)/chat/settings'),
                   'Mobile > Chat > Settings',
                 ),
+                handle: { meta: mobileAgentSettingsRouteMeta },
                 path: 'settings',
               },
             ],
@@ -37,7 +52,7 @@ export const mobileRoutes: RouteObject[] = [
               () => import('@/routes/(mobile)/chat/_layout'),
               'Mobile > Chat > Layout',
             ),
-            errorElement: <ErrorBoundary resetPath="/agent" />,
+            errorElement: <ErrorBoundary />,
             path: ':aid',
           },
         ],
@@ -165,7 +180,7 @@ export const mobileRoutes: RouteObject[] = [
           () => import('@/routes/(mobile)/community/_layout'),
           'Mobile > Discover > Layout',
         ),
-        errorElement: <ErrorBoundary resetPath="/community" />,
+        errorElement: <ErrorBoundary />,
         path: 'community',
       },
 
@@ -214,8 +229,54 @@ export const mobileRoutes: RouteObject[] = [
           () => import('@/routes/(mobile)/settings/_layout'),
           'Mobile > Settings > Layout',
         ),
-        errorElement: <ErrorBoundary resetPath="/settings" />,
+        errorElement: <ErrorBoundary />,
         path: 'settings',
+      },
+
+      // Task workspace routes (cross-agent)
+      {
+        children: [
+          {
+            children: [
+              {
+                element: dynamicElement(() => import('@/routes/(main)/tasks'), 'Mobile > Tasks'),
+                index: true,
+              },
+            ],
+            errorElement: <ErrorBoundary resetPath="/" />,
+            path: 'tasks',
+          },
+          {
+            children: [
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(main)/task/[taskId]'),
+                  'Mobile > Task Detail',
+                ),
+                path: ':taskId',
+              },
+            ],
+            errorElement: <ErrorBoundary resetPath="/tasks" />,
+            path: 'task',
+          },
+          {
+            children: [
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(main)/agent/task/[taskId]'),
+                  'Mobile > Agent Task Detail',
+                ),
+                path: ':aid/task/:taskId',
+              },
+            ],
+            errorElement: <ErrorBoundary resetPath="/tasks" />,
+            path: 'agent',
+          },
+        ],
+        element: dynamicLayout(
+          () => import('@/routes/(main)/(task-workspace)/_layout'),
+          'Mobile > Task Workspace > Layout',
+        ),
       },
 
       ...BusinessMobileRoutesWithMainLayout,
@@ -269,7 +330,7 @@ export const mobileRoutes: RouteObject[] = [
             ),
           },
         ],
-        errorElement: <ErrorBoundary resetPath="/me" />,
+        errorElement: <ErrorBoundary />,
         path: 'me',
       },
 
@@ -294,14 +355,30 @@ export const mobileRoutes: RouteObject[] = [
       },
     ],
     element: dynamicLayout(() => import('@/routes/(mobile)/_layout'), 'Mobile > Main > Layout'),
-    errorElement: <ErrorBoundary resetPath="/" />,
+    errorElement: <ErrorBoundary />,
     path: '/',
   },
   // Onboarding route (outside main layout)
   {
     element: dynamicElement(() => import('@/routes/onboarding'), 'Mobile > Onboarding'),
-    errorElement: <ErrorBoundary resetPath="/" />,
+    errorElement: <ErrorBoundary />,
     path: '/onboarding',
+  },
+  {
+    element: dynamicElement(
+      () => import('@/routes/onboarding/agent'),
+      'Mobile > Onboarding > Agent',
+    ),
+    errorElement: <ErrorBoundary />,
+    path: '/onboarding/agent',
+  },
+  {
+    element: dynamicElement(
+      () => import('@/routes/onboarding/classic'),
+      'Mobile > Onboarding > Classic',
+    ),
+    errorElement: <ErrorBoundary />,
+    path: '/onboarding/classic',
   },
   ...BusinessMobileRoutesWithoutMainLayout,
 
@@ -310,6 +387,7 @@ export const mobileRoutes: RouteObject[] = [
     children: [
       {
         element: dynamicElement(() => import('@/routes/share/t/[id]'), 'Mobile > Share > Topic'),
+        handle: { meta: shareTopicRouteMeta },
         path: ':id',
       },
     ],

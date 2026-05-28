@@ -47,6 +47,7 @@ vi.mock('@/database/models/agent', () => ({
       provider: 'openai',
       systemRole: 'You are a helpful assistant',
     }),
+    queryAgents: vi.fn().mockResolvedValue([]),
   })),
 }));
 
@@ -71,10 +72,13 @@ vi.mock('@/database/models/plugin', () => ({
   })),
 }));
 
+const topicMock = {
+  create: vi.fn().mockResolvedValue({ id: 'topic-1', metadata: undefined }),
+  findById: vi.fn().mockResolvedValue(undefined),
+  updateMetadata: vi.fn().mockResolvedValue(undefined),
+};
 vi.mock('@/database/models/topic', () => ({
-  TopicModel: vi.fn().mockImplementation(() => ({
-    create: vi.fn().mockResolvedValue({ id: 'topic-1' }),
-  })),
+  TopicModel: vi.fn().mockImplementation(() => topicMock),
 }));
 
 vi.mock('@/database/models/thread', () => ({
@@ -139,6 +143,9 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    topicMock.create.mockResolvedValue({ id: 'topic-1', metadata: undefined });
+    topicMock.findById.mockResolvedValue(undefined);
+    topicMock.updateMetadata.mockResolvedValue(undefined);
     mockMessageCreate.mockResolvedValue({ id: 'msg-1' });
     mockCreateOperation.mockResolvedValue({
       autoStarted: true,
@@ -180,7 +187,13 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 
@@ -195,7 +208,13 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 
@@ -210,7 +229,13 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 
@@ -238,7 +263,14 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
   });
 
   describe('Web UI scenario (no botContext/discordContext)', () => {
-    it('should NOT auto-activate even with one device online', async () => {
+    // regular chat used to leave activeDeviceId undefined when no
+    // device was bound, which caused the local-system system prompt's
+    // {{workingDirectory}} / {{hostname}} placeholders to reach the LLM as
+    // literals. The model would then waste the first N steps groping for cwd.
+    // Now we auto-activate when exactly one device is online — multi-device
+    // users still need to bind explicitly, since picking one by recency
+    // would be a guess that could route tool calls to the wrong machine.
+    it('should auto-activate the only online device', async () => {
       mockDeviceProxy.isConfigured = true;
       mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice]);
 
@@ -248,6 +280,32 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
       });
 
       expect(mockCreateOperation).toHaveBeenCalled();
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBe('device-001');
+    });
+
+    it('should NOT auto-activate when multiple devices are online', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice, onlineDevice2]);
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        prompt: 'List my files',
+      });
+
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBeUndefined();
+    });
+
+    it('should NOT auto-activate when no devices are online', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([]);
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        prompt: 'List my files',
+      });
+
       const createOpArgs = mockCreateOperation.mock.calls[0][0];
       expect(createOpArgs.activeDeviceId).toBeUndefined();
     });
@@ -324,13 +382,123 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
     });
   });
 
+  describe('topic and explicit device binding', () => {
+    it('should prefer explicit deviceId over topic and agent bindings when online', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice, onlineDevice2]);
+      topicMock.findById.mockResolvedValue({ metadata: { boundDeviceId: 'device-002' } });
+
+      const { AgentService } = await import('@/server/services/agent');
+      vi.mocked(AgentService).mockImplementation(
+        () =>
+          ({
+            getAgentConfig: vi.fn().mockResolvedValue({
+              agencyConfig: { boundDeviceId: 'device-002' },
+              chatConfig: {},
+              files: [],
+              id: 'agent-1',
+              knowledgeBases: [],
+              model: 'gpt-4',
+              plugins: [],
+              provider: 'openai',
+              systemRole: 'You are a helpful assistant',
+            }),
+          }) as any,
+      );
+
+      service = new AiAgentService(mockDb, userId);
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        appContext: { topicId: 'topic-existing' },
+        deviceId: 'device-001',
+        prompt: 'Run a command',
+      });
+
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBe('device-001');
+      // updateMetadata is called for runningOperation persistence, but not for device binding
+      expect(topicMock.updateMetadata).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ boundDeviceId: expect.anything() }),
+      );
+    });
+
+    // Verifies topic-stored metadata.boundDeviceId is NOT silently reused as
+    // the runtime bound device. Setup: topic.metadata says device-002, but the
+    // only online device is device-001. If the topic metadata were reused as
+    // boundDeviceId, activeDeviceId would be undefined (device-002 is offline).
+    // After auto-activate, we instead pick the most-recent online
+    // device (device-001) — proving the topic's stale metadata wasn't honored.
+    it('should not reuse topic boundDeviceId when no explicit deviceId is provided', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice]);
+      topicMock.findById.mockResolvedValue({ metadata: { boundDeviceId: 'device-002' } });
+      const { AgentService } = await import('@/server/services/agent');
+      vi.mocked(AgentService).mockImplementation(
+        () =>
+          ({
+            getAgentConfig: vi.fn().mockResolvedValue({
+              chatConfig: {},
+              files: [],
+              id: 'agent-1',
+              knowledgeBases: [],
+              model: 'gpt-4',
+              plugins: [],
+              provider: 'openai',
+              systemRole: 'You are a helpful assistant',
+            }),
+          }) as any,
+      );
+
+      service = new AiAgentService(mockDb, userId);
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        appContext: { topicId: 'topic-existing' },
+        prompt: 'Run a command',
+      });
+
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).not.toBe('device-002');
+      expect(createOpArgs.activeDeviceId).toBe('device-001');
+    });
+
+    it('should keep explicit topic binding when the bound device is offline', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice2]);
+
+      service = new AiAgentService(mockDb, userId);
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        deviceId: 'device-001',
+        prompt: 'Run a command',
+      });
+
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBeUndefined();
+      expect(topicMock.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ boundDeviceId: 'device-001' }),
+        }),
+      );
+    });
+  });
+
   describe('gateway not configured', () => {
     it('should never set activeDeviceId when gateway is not configured', async () => {
       mockDeviceProxy.isConfigured = false;
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 
@@ -341,18 +509,112 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
     });
   });
 
-  describe('Remote Device tool injection when device is auto-activated', () => {
-    it('should mark autoActivated when single device is auto-activated (IM/Bot)', async () => {
+  describe('topic metadata binding', () => {
+    it('should include requested deviceId when creating a new topic', async () => {
       mockDeviceProxy.isConfigured = true;
       mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice]);
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        deviceId: 'device-001',
+        prompt: 'Run with device',
+      });
+
+      expect(topicMock.create).toHaveBeenCalled();
+      const createArgs = topicMock.create.mock.calls[0][0];
+      expect(createArgs.metadata?.boundDeviceId).toBe('device-001');
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBe('device-001');
+    });
+
+    // Mirrors the "should not reuse topic boundDeviceId" test above with a
+    // different mock shape. Topic metadata stores device-002, but only
+    // device-001 is online; if topic metadata leaked into boundDeviceId,
+    // activeDeviceId would be undefined (since device-002 is offline). The
+    // post-auto-activate picks device-001 instead, confirming the
+    // stale topic.metadata.boundDeviceId path is dead.
+    it('should not reuse topic metadata bound device when no deviceId is supplied', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice]);
+      topicMock.findById.mockResolvedValue({
+        id: 'topic-1',
+        metadata: { boundDeviceId: 'device-002' },
+      });
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        prompt: 'Use topic device',
+        appContext: { topicId: 'topic-1' },
+      });
+
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).not.toBe('device-002');
+      expect(createOpArgs.activeDeviceId).toBe('device-001');
+    });
+
+    it('should not update topic metadata when a new deviceId is provided for existing topic', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice2]);
+      topicMock.findById.mockResolvedValue({
+        id: 'topic-1',
+        metadata: { boundDeviceId: 'device-old' },
+      });
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        prompt: 'Switch device',
+        appContext: { topicId: 'topic-1' },
+        deviceId: 'device-002',
+      });
+
+      // updateMetadata is called for runningOperation persistence, but not for device binding
+      expect(topicMock.updateMetadata).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ boundDeviceId: expect.anything() }),
+      );
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBe('device-002');
+    });
+  });
+
+  describe('Remote Device tool injection when device is auto-activated', () => {
+    it('should mark autoActivated when single device is auto-activated (IM/Bot)', async () => {
+      mockDeviceProxy.isConfigured = true;
+      mockDeviceProxy.queryDeviceList.mockResolvedValue([onlineDevice]);
+
+      const { AgentService } = await import('@/server/services/agent');
+      vi.mocked(AgentService).mockImplementation(
+        () =>
+          ({
+            getAgentConfig: vi.fn().mockResolvedValue({
+              chatConfig: {},
+              files: [],
+              id: 'agent-1',
+              knowledgeBases: [],
+              model: 'gpt-4',
+              plugins: [],
+              provider: 'openai',
+              systemRole: 'You are a helpful assistant',
+            }),
+          }) as any,
+      );
+      service = new AiAgentService(mockDb, userId);
+
+      await service.execAgent({
+        agentId: 'agent-1',
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 
       const toolsEngineArgs = mockCreateServerAgentToolsEngine.mock.calls[0][1];
+      const createOpArgs = mockCreateOperation.mock.calls[0][0];
+      expect(createOpArgs.activeDeviceId).toBe('device-001');
       // Device auto-activated → Remote Device tool should be suppressed
       expect(toolsEngineArgs.deviceContext.autoActivated).toBe(true);
     });
@@ -414,7 +676,13 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 
@@ -428,7 +696,13 @@ describe('AiAgentService.execAgent - device auto-activation', () => {
 
       await service.execAgent({
         agentId: 'agent-1',
-        botContext: { platform: 'discord' } as any,
+        botContext: {
+          applicationId: 'app-1',
+          isOwner: true,
+          platform: 'discord',
+          platformThreadId: 'discord:guild-1:channel-1',
+          senderExternalUserId: 'owner-id',
+        } as any,
         prompt: 'List my files',
       });
 

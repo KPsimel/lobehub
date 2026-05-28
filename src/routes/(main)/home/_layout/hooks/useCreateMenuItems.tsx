@@ -1,8 +1,10 @@
+import { isDesktop } from '@lobechat/const';
+import { HETEROGENEOUS_AGENT_CLIENT_CONFIGS } from '@lobechat/heterogeneous-agents/client';
 import { Icon } from '@lobehub/ui';
 import { GroupBotSquareIcon } from '@lobehub/ui/icons';
 import { App } from 'antd';
-import { type ItemType } from 'antd/es/menu/interface';
-import { BotIcon, FileTextIcon, FolderCogIcon, FolderPlus } from 'lucide-react';
+import type { ItemType } from 'antd/es/menu/interface';
+import { BotIcon, FileTextIcon, FolderCogIcon, FolderPlus, MonitorSmartphone } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -10,13 +12,17 @@ import useSWRMutation from 'swr/mutation';
 
 import { useGroupTemplates } from '@/components/ChatGroupWizard/templates';
 import { DEFAULT_CHAT_GROUP_CHAT_CONFIG } from '@/const/settings';
-import { type CreateAgentParams } from '@/services/agent';
-import { type GroupMemberConfig } from '@/services/chatGroup';
+import { useCreateHeteroAgent } from '@/hooks/useCreateHeteroAgent';
+import { useOptionalAgentModal } from '@/routes/(main)/home/_layout/Body/Agent/ModalProvider';
+import type { CreateAgentParams } from '@/services/agent';
+import type { GroupMemberConfig } from '@/services/chatGroup';
 import { chatGroupService } from '@/services/chatGroup';
 import { useAgentStore } from '@/store/agent';
 import { useAgentGroupStore } from '@/store/agentGroup';
 import { useHomeStore } from '@/store/home';
 import { usePageStore } from '@/store/page';
+import { useUserStore } from '@/store/user';
+import { labPreferSelectors } from '@/store/user/selectors';
 
 interface CreateAgentOptions {
   groupId?: string;
@@ -43,6 +49,7 @@ export const useCreateMenuItems = () => {
   ]);
   const [createGroup, loadGroups] = useAgentGroupStore((s) => [s.createGroup, s.loadGroups]);
   const createNewPage = usePageStore((s) => s.createNewPage);
+  const createHeterogeneousAgent = useCreateHeteroAgent();
 
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [isCreatingSessionGroup, setIsCreatingSessionGroup] = useState(false);
@@ -65,12 +72,12 @@ export const useCreateMenuItems = () => {
   // SWR-based group creation with auto navigation to profile
   const { trigger: mutateGroup, isMutating: isMutatingGroup } = useSWRMutation(
     'group.createGroup',
-    async (_key: string, { arg }: { arg?: CreateAgentOptions }) => {
+    async (_key: string, { arg }: { arg?: CreateAgentOptions & { title?: string } }) => {
       const groupId = await createGroup(
         {
           config: DEFAULT_CHAT_GROUP_CHAT_CONFIG,
           groupId: arg?.groupId,
-          title: t('defaultGroupChat'),
+          title: arg?.title || t('defaultGroupChat'),
         },
         [],
         true, // silent mode - don't switch session, we'll navigate instead
@@ -87,11 +94,12 @@ export const useCreateMenuItems = () => {
   );
 
   /**
-   * Create agent action
+   * Create agent action (optionally with a prompt as systemRole)
    */
   const createAgent = useCallback(
-    async (options?: CreateAgentOptions) => {
-      await mutateAgent({ groupId: options?.groupId });
+    async (options?: CreateAgentOptions & { prompt?: string }) => {
+      const config = options?.prompt ? { systemRole: options.prompt } : undefined;
+      await mutateAgent({ config, groupId: options?.groupId });
       options?.onSuccess?.();
     },
     [mutateAgent],
@@ -181,6 +189,20 @@ export const useCreateMenuItems = () => {
   );
 
   /**
+   * Create empty group and navigate to profile
+   */
+  const createEmptyGroup = useCallback(
+    async (options?: CreateAgentOptions & { title?: string }) => {
+      await mutateGroup(options);
+    },
+    [mutateGroup],
+  );
+
+  const agentModal = useOptionalAgentModal();
+  const openCreateModal = agentModal?.openCreateModal;
+  const enablePlatformAgent = useUserStore(labPreferSelectors.enablePlatformAgent);
+
+  /**
    * Create agent menu item
    */
   const createAgentMenuItem = useCallback(
@@ -190,20 +212,60 @@ export const useCreateMenuItems = () => {
       label: t('newAgent'),
       onClick: async (info) => {
         info.domEvent?.stopPropagation();
-        await createAgent(options);
+        if (openCreateModal) {
+          openCreateModal('agent', options?.groupId ? { groupId: options.groupId } : undefined);
+        } else {
+          await createAgent(options);
+        }
       },
     }),
-    [t, createAgent],
+    [t, createAgent, openCreateModal],
   );
 
   /**
-   * Create empty group and navigate to profile
+   * Create heterogeneous agent menu items (Desktop only)
    */
-  const createEmptyGroup = useCallback(
-    async (options?: CreateAgentOptions) => {
-      await mutateGroup(options);
+  const createHeterogeneousAgentMenuItems = useCallback(
+    (options?: CreateAgentOptions): ItemType[] => {
+      if (!isDesktop) return [];
+
+      return HETEROGENEOUS_AGENT_CLIENT_CONFIGS.map((definition) => {
+        const AgentIcon = definition.icon;
+
+        return {
+          icon: <AgentIcon size={'1em'} />,
+          key: definition.menuKey,
+          label: t(definition.menuLabelKey),
+          onClick: async (info) => {
+            info.domEvent?.stopPropagation();
+            await createHeterogeneousAgent(definition, options);
+          },
+        };
+      });
     },
-    [mutateGroup],
+    [t, createHeterogeneousAgent],
+  );
+
+  /**
+   * Create platform agent menu item (openclaw / hermes — remote device agents)
+   * Opens the 3-step creation modal
+   */
+  const createPlatformAgentMenuItem = useCallback(
+    (options?: CreateAgentOptions): ItemType => {
+      if (!enablePlatformAgent) return null;
+      return {
+        icon: <Icon icon={MonitorSmartphone} />,
+        key: 'newPlatformAgent',
+        label: t('newPlatformAgent'),
+        onClick: (info) => {
+          info.domEvent?.stopPropagation();
+          agentModal?.openCreatePlatformAgentModal(
+            options?.groupId ? { groupId: options.groupId } : undefined,
+          );
+        },
+      };
+    },
+    [t, agentModal, enablePlatformAgent],
   );
 
   /**
@@ -217,10 +279,14 @@ export const useCreateMenuItems = () => {
       label: t('newGroupChat'),
       onClick: async (info) => {
         info.domEvent?.stopPropagation();
-        await createEmptyGroup(options);
+        if (openCreateModal) {
+          openCreateModal('group', options?.groupId ? { groupId: options.groupId } : undefined);
+        } else {
+          await createEmptyGroup(options);
+        }
       },
     }),
-    [t, createEmptyGroup],
+    [t, createEmptyGroup, openCreateModal],
   );
 
   /**
@@ -294,10 +360,14 @@ export const useCreateMenuItems = () => {
     createEmptyGroup,
     createGroupChatMenuItem,
     createGroupFromTemplate,
+    createHeterogeneousAgent,
+    createHeterogeneousAgentMenuItems,
     createGroupWithMembers,
     createPage,
     createPageMenuItem,
+    createPlatformAgentMenuItem,
     createSessionGroupMenuItem,
+    openCreateModal,
 
     // Loading states
     isCreatingGroup,

@@ -2,7 +2,12 @@
 
 import { Flexbox } from '@lobehub/ui';
 import { BotPromptIcon } from '@lobehub/ui/icons';
-import { MessageSquarePlusIcon, RadioTowerIcon, SearchIcon } from 'lucide-react';
+import {
+  MessageSquarePlusIcon,
+  MessagesSquareIcon,
+  RadioTowerIcon,
+  SearchIcon,
+} from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
@@ -12,6 +17,8 @@ import NavItem from '@/features/NavPanel/components/NavItem';
 import { useQueryRoute } from '@/hooks/useQueryRoute';
 import { usePathname } from '@/libs/router/navigation';
 import { useActionSWR } from '@/libs/swr';
+import { useAgentStore } from '@/store/agent';
+import { agentSelectors } from '@/store/agent/selectors';
 import { useChatStore } from '@/store/chat';
 import { useGlobalStore } from '@/store/global';
 import { featureFlagsSelectors, useServerConfigStore } from '@/store/serverConfig';
@@ -23,18 +30,29 @@ const Nav = memo(() => {
   const agentId = params.aid;
   const pathname = usePathname();
   const isProfileActive = pathname.includes('/profile');
-  const isIntegrationActive = pathname.includes('/channel');
+  const isChannelActive = pathname.includes('/channel');
+  // Topic IDs are prefixed `topics_`, so /agent/:aid/topics_abc would also match
+  // pathname.includes('/topics') — anchor to end to avoid that false positive.
+  const isTopicsActive = pathname.endsWith('/topics');
   const router = useQueryRoute();
   const { isAgentEditable } = useServerConfigStore(featureFlagsSelectors);
   const toggleCommandMenu = useGlobalStore((s) => s.toggleCommandMenu);
+  const heterogeneousProviderType = useAgentStore(
+    agentSelectors.currentAgentHeterogeneousProviderType,
+  );
   const hideProfile = !isAgentEditable;
+  // Claude Code agents can use message channels; other hetero providers (e.g. codex) still hide it.
+  const hideChannel =
+    hideProfile || (!!heterogeneousProviderType && heterogeneousProviderType !== 'claude-code');
   const switchTopic = useChatStore((s) => s.switchTopic);
   const [openNewTopicOrSaveTopic] = useChatStore((s) => [s.openNewTopicOrSaveTopic]);
 
   const { mutate } = useActionSWR('openNewTopicOrSaveTopic', openNewTopicOrSaveTopic);
   const handleNewTopic = () => {
-    // If in agent sub-route, navigate back to agent chat first
-    if (isProfileActive && agentId) {
+    // Always navigate to the bare agent chat URL — drops any sub-route
+    // (/profile, /channel, /page, /cron/:cronId, …) and any `:topicId`
+    // segment so the new topic isn't conflated with the previous URL.
+    if (agentId) {
       router.push(urlJoin('/agent', agentId));
     }
     mutate();
@@ -47,6 +65,13 @@ const Nav = memo(() => {
         title={tTopic('actions.addNewTopic')}
         onClick={handleNewTopic}
       />
+      <NavItem
+        icon={SearchIcon}
+        title={t('tab.search')}
+        onClick={() => {
+          toggleCommandMenu(true);
+        }}
+      />
       {!hideProfile && (
         <NavItem
           active={isProfileActive}
@@ -58,9 +83,18 @@ const Nav = memo(() => {
           }}
         />
       )}
-      {!hideProfile && (
+      <NavItem
+        active={isTopicsActive}
+        icon={MessagesSquareIcon}
+        title={tTopic('management.sidebarEntry')}
+        onClick={() => {
+          switchTopic(null, { skipRefreshMessage: true });
+          router.push(urlJoin('/agent', agentId!, 'topics'));
+        }}
+      />
+      {!hideChannel && (
         <NavItem
-          active={isIntegrationActive}
+          active={isChannelActive}
           icon={RadioTowerIcon}
           title={t('tab.integration')}
           onClick={() => {
@@ -69,13 +103,6 @@ const Nav = memo(() => {
           }}
         />
       )}
-      <NavItem
-        icon={SearchIcon}
-        title={t('tab.search')}
-        onClick={() => {
-          toggleCommandMenu(true);
-        }}
-      />
     </Flexbox>
   );
 });

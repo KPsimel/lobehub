@@ -1,19 +1,23 @@
 import { ActionIcon, DropdownMenu, Flexbox, Icon } from '@lobehub/ui';
+import { confirmModal } from '@lobehub/ui/base-ui';
 import { ShapesUploadIcon } from '@lobehub/ui/icons';
-import { Modal } from 'antd';
 import isEqual from 'fast-deep-equal';
-import { BotMessageSquareIcon, MoreHorizontal, Settings2Icon } from 'lucide-react';
+import { BotMessageSquareIcon, MoreHorizontal, Settings2Icon, Trash } from 'lucide-react';
 import { memo, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import { message } from '@/components/AntdStaticMethods';
-import { DESKTOP_HEADER_ICON_SIZE } from '@/const/layoutTokens';
+import { DESKTOP_HEADER_ICON_SMALL_SIZE } from '@/const/layoutTokens';
 import NavHeader from '@/features/NavHeader';
 import ToggleRightPanelButton from '@/features/RightPanel/ToggleRightPanelButton';
 import { useMarketAuth } from '@/layout/AuthProvider/MarketAuth';
 import { resolveMarketAuthError } from '@/layout/AuthProvider/MarketAuth/errors';
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
+import { useGlobalStore } from '@/store/global';
+import { systemStatusSelectors } from '@/store/global/selectors';
+import { useHomeStore } from '@/store/home';
 
 import AgentForkTag from './AgentForkTag';
 import ForkConfirmModal from './AgentPublishButton/ForkConfirmModal';
@@ -24,10 +28,20 @@ import AgentVersionReviewTag, { useVersionReviewStatus } from './AgentVersionRev
 import AutoSaveHint from './AutoSaveHint';
 
 const Header = memo(() => {
-  const { t } = useTranslation(['setting', 'marketAuth']);
+  const { t } = useTranslation(['setting', 'marketAuth', 'chat']);
+  const navigate = useNavigate();
 
   const meta = useAgentStore(agentSelectors.currentAgentMeta, isEqual);
   const systemRole = useAgentStore(agentSelectors.currentAgentSystemRole);
+  const activeAgentId = useAgentStore((s) => s.activeAgentId);
+  const isHeterogeneous = useAgentStore(agentSelectors.isCurrentAgentHeterogeneous);
+  const canPublishToCommunity = useAgentStore(agentSelectors.canCurrentAgentPublishToCommunity);
+  const [showAgentBuilderPanel, toggleAgentBuilderPanel, isStatusInit] = useGlobalStore((s) => [
+    systemStatusSelectors.showAgentBuilderPanel(s),
+    s.toggleAgentBuilderPanel,
+    systemStatusSelectors.isStatusInit(s),
+  ]);
+  const removeAgent = useHomeStore((s) => s.removeAgent);
   const { isAuthenticated, isLoading: isAuthLoading, signIn } = useMarketAuth();
   const { isUnderReview } = useVersionReviewStatus();
 
@@ -82,8 +96,7 @@ const Header = memo(() => {
       return;
     }
 
-    Modal.confirm({
-      okButtonProps: { type: 'primary' },
+    confirmModal({
       onOk: async () => {
         if (!isAuthenticated) {
           try {
@@ -111,6 +124,19 @@ const Header = memo(() => {
     await publish();
   }, [publish]);
 
+  const handleDelete = useCallback(() => {
+    if (!activeAgentId) return;
+    confirmModal({
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await removeAgent(activeAgentId);
+        message.success(t('confirmRemoveSessionSuccess', { ns: 'chat' }));
+        navigate('/');
+      },
+      title: t('confirmRemoveSessionItemAlert', { ns: 'chat' }),
+    });
+  }, [activeAgentId, navigate, removeAgent, t]);
+
   const menuItems = useMemo(
     () => [
       {
@@ -120,14 +146,26 @@ const Header = memo(() => {
         onClick: () => useAgentStore.setState({ showAgentSetting: true }),
       },
       { type: 'divider' as const },
+      ...(canPublishToCommunity
+        ? [
+            {
+              icon: <Icon icon={ShapesUploadIcon} />,
+              key: 'publish',
+              label: t('publishToCommunity', { ns: 'setting' }),
+              onClick: handlePublishClick,
+            },
+            { type: 'divider' as const },
+          ]
+        : []),
       {
-        icon: <Icon icon={ShapesUploadIcon} />,
-        key: 'publish',
-        label: t('publishToCommunity', { ns: 'setting' }),
-        onClick: handlePublishClick,
+        danger: true,
+        icon: <Icon icon={Trash} />,
+        key: 'delete',
+        label: t('delete', { ns: 'common' }),
+        onClick: handleDelete,
       },
     ],
-    [handlePublishClick, t],
+    [canPublishToCommunity, handlePublishClick, handleDelete, t],
   );
 
   return (
@@ -146,11 +184,18 @@ const Header = memo(() => {
             <DropdownMenu items={menuItems}>
               <ActionIcon
                 icon={MoreHorizontal}
-                loading={isPublishing || isAuthLoading}
-                size={DESKTOP_HEADER_ICON_SIZE}
+                loading={canPublishToCommunity && (isPublishing || isAuthLoading)}
+                size={DESKTOP_HEADER_ICON_SMALL_SIZE}
               />
             </DropdownMenu>
-            <ToggleRightPanelButton icon={BotMessageSquareIcon} showActive={true} />
+            {!isHeterogeneous && isStatusInit && (
+              <ToggleRightPanelButton
+                expand={showAgentBuilderPanel}
+                icon={BotMessageSquareIcon}
+                showActive={true}
+                onToggle={() => toggleAgentBuilderPanel()}
+              />
+            )}
           </Flexbox>
         }
       />

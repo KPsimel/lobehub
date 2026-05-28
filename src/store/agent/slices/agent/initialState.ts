@@ -1,14 +1,18 @@
-import { type PartialDeep } from 'type-fest';
+import type { AgentContextDocument } from '@lobechat/context-engine';
+import type { PartialDeep } from 'type-fest';
 
 import { type AgentSettingsInstance } from '@/features/AgentSetting';
 import { type AgentItem } from '@/types/agent';
 import { type MetaData } from '@/types/meta';
+
+import { readAllLocalAgentWorkingDirectories } from '../../utils/localAgentWorkingDirectoryStorage';
 
 export type LoadingState = Record<Partial<keyof MetaData> | string, boolean>;
 export type SaveStatus = 'idle' | 'saving' | 'saved';
 
 export interface AgentSliceState {
   activeAgentId?: string;
+  agentDocumentsMap: Record<string, AgentContextDocument[]>;
   agentMap: Record<string, PartialDeep<AgentItem>>;
   agentSettingInstance?: AgentSettingsInstance | null;
   /**
@@ -23,6 +27,11 @@ export interface AgentSliceState {
    * Loading state for meta fields (used during autocomplete)
    */
   loadingState: LoadingState;
+  /**
+   * Per-agent local working directory. Persisted to localStorage; held in
+   * store so subscribers re-render on change.
+   */
+  localAgentWorkingDirectoryMap: Record<string, string>;
   /**
    * Save status for showing auto-save hint
    */
@@ -42,9 +51,11 @@ export interface AgentSliceState {
 }
 
 export const initialAgentSliceState: AgentSliceState = {
+  agentDocumentsMap: {},
   agentMap: {},
   isAgentPinned: false,
   lastUpdatedTime: null,
+  localAgentWorkingDirectoryMap: readAllLocalAgentWorkingDirectories(),
   loadingState: {
     avatar: false,
     backgroundColor: false,

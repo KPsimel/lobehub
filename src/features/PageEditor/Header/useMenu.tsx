@@ -4,7 +4,7 @@ import { Icon } from '@lobehub/ui';
 import { App } from 'antd';
 import { cssVar, useResponsive } from 'antd-style';
 import dayjs from 'dayjs';
-import { CopyPlus, Download, Link2, Maximize2, Trash2 } from 'lucide-react';
+import { Clock3Icon, CopyPlus, Download, Link2, Maximize2, Trash2 } from 'lucide-react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -21,7 +21,7 @@ import { usePageEditorStore, useStoreApi } from '../store';
  */
 export const useMenu = (): { menuItems: any[] } => {
   const { t } = useTranslation(['file', 'common', 'chat']);
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const storeApi = useStoreApi();
   const { lg = true } = useResponsive();
 
@@ -33,8 +33,10 @@ export const useMenu = (): { menuItems: any[] } => {
   );
 
   const duplicateDocument = useFileStore((s) => s.duplicateDocument);
+  const setRightPanelMode = usePageEditorStore((s) => s.setRightPanelMode);
 
-  const [wideScreen, toggleWideScreen] = useGlobalStore((s) => [
+  const [togglePageAgentPanel, wideScreen, toggleWideScreen] = useGlobalStore((s) => [
+    s.togglePageAgentPanel,
     systemStatusSelectors.wideScreen(s),
     s.toggleWideScreen,
   ]);
@@ -120,13 +122,22 @@ export const useMenu = (): { menuItems: any[] } => {
         },
       },
       {
+        icon: <Icon icon={Clock3Icon} />,
+        key: 'version-history',
+        label: t('pageEditor.history.title'),
+        onClick: () => {
+          setRightPanelMode('history');
+          togglePageAgentPanel(true);
+        },
+      },
+      {
         danger: true,
         icon: <Icon icon={Trash2} />,
         key: 'delete',
         label: t('delete', { ns: 'common' }),
         onClick: async () => {
           const state = storeApi.getState();
-          await state.handleDelete(t as any, message, modal, state.onDelete);
+          await state.handleDelete(t as any, message, state.onDelete);
         },
       },
       {
@@ -174,9 +185,10 @@ export const useMenu = (): { menuItems: any[] } => {
     storeApi,
     t,
     message,
-    modal,
+    setRightPanelMode,
     wideScreen,
     toggleWideScreen,
+    togglePageAgentPanel,
     showViewModeSwitch,
     handleDuplicate,
     handleExportMarkdown,

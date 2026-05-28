@@ -1,3 +1,4 @@
+import { LocalSystemManifest } from '@lobechat/builtin-tool-local-system';
 import { RemoteDeviceManifest } from '@lobechat/builtin-tool-remote-device';
 import type * as ModelBankModule from 'model-bank';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +12,7 @@ const {
   mockGetAgentConfig,
   mockGetEnabledPluginManifests,
   mockMessageCreate,
+  mockPluginQuery,
   mockQueryDeviceList,
 } = vi.hoisted(() => ({
   mockCreateOperation: vi.fn(),
@@ -19,6 +21,7 @@ const {
   mockGetAgentConfig: vi.fn(),
   mockGetEnabledPluginManifests: vi.fn(),
   mockMessageCreate: vi.fn(),
+  mockPluginQuery: vi.fn(),
   mockQueryDeviceList: vi.fn(),
 }));
 
@@ -39,6 +42,7 @@ vi.mock('@/database/models/message', () => ({
 vi.mock('@/database/models/agent', () => ({
   AgentModel: vi.fn().mockImplementation(() => ({
     getAgentConfig: vi.fn(),
+    queryAgents: vi.fn().mockResolvedValue([]),
   })),
 }));
 
@@ -50,7 +54,7 @@ vi.mock('@/server/services/agent', () => ({
 
 vi.mock('@/database/models/plugin', () => ({
   PluginModel: vi.fn().mockImplementation(() => ({
-    query: vi.fn().mockResolvedValue([]),
+    query: mockPluginQuery,
   })),
 }));
 
@@ -144,7 +148,7 @@ const createBaseAgentConfig = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 });
 
-describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
+describe('AiAgentService.execAgent - device tool pipeline ()', () => {
   let service: AiAgentService;
   const mockDb = {} as any;
   const userId = 'test-user-id';
@@ -159,6 +163,7 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       success: true,
     });
     mockQueryDeviceList.mockResolvedValue([]);
+    mockPluginQuery.mockResolvedValue([]);
     mockGenerateToolsDetailed.mockReturnValue({ enabledToolIds: [], tools: [] });
     mockGetEnabledPluginManifests.mockReturnValue(new Map());
     service = new AiAgentService(mockDb, userId);
@@ -203,6 +208,7 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       expect(mockCreateServerAgentToolsEngine).toHaveBeenCalledTimes(1);
       const params = mockCreateServerAgentToolsEngine.mock.calls[0][1];
       expect(params.deviceContext).toEqual({
+        autoActivated: true,
         boundDeviceId: undefined,
         deviceOnline: true,
         gatewayConfigured: true,
@@ -272,8 +278,130 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       const callArgs = mockCreateOperation.mock.calls[0][0];
       const manifestMap = callArgs.toolSet.manifestMap;
 
-      // RemoteDevice should NOT be in manifestMap — no manual injection
-      expect(manifestMap[RemoteDeviceManifest.identifier]).toBeUndefined();
+      // RemoteDevice is present in manifestMap (discoverable builtin),
+      // but should NOT be in enabledToolIds when gateway is not configured
+      const enabledToolIds = callArgs.toolSet.enabledToolIds;
+      expect(enabledToolIds).not.toContain(RemoteDeviceManifest.identifier);
+    });
+  });
+
+  describe('toolExecutorMap gating on gatewayConfigured (regression for #13769)', () => {
+    it('should mark local-system as client when gateway is NOT configured (standalone Electron)', async () => {
+      const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
+      vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(false);
+
+      mockGetEnabledPluginManifests.mockReturnValue(
+        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
+      );
+      mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
+
+      await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
+
+      const executorMap = mockCreateOperation.mock.calls[0][0].toolSet.executorMap;
+      expect(executorMap[LocalSystemManifest.identifier]).toBe('client');
+    });
+
+    it('should NOT mark local-system as client when gateway IS configured (cloud)', async () => {
+      const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
+      vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(true);
+      mockQueryDeviceList.mockResolvedValue([
+        { deviceId: 'dev-1', deviceName: 'My PC', platform: 'win32' },
+      ]);
+
+      mockGetEnabledPluginManifests.mockReturnValue(
+        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
+      );
+      mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
+
+      await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
+
+      const executorMap = mockCreateOperation.mock.calls[0][0].toolSet.executorMap;
+      expect(executorMap[LocalSystemManifest.identifier]).toBeUndefined();
+    });
+
+    it('should mark stdio MCP plugin as client only when gateway is NOT configured', async () => {
+      const stdioPlugin = {
+        customParams: { mcp: { type: 'stdio' } },
+        identifier: 'my-stdio-mcp',
+      } as any;
+      const stdioManifest = {
+        api: [{ description: 't', name: 'a', parameters: {} }],
+        identifier: 'my-stdio-mcp',
+        meta: { title: 'Stdio' },
+      };
+
+      mockPluginQuery.mockResolvedValue([stdioPlugin]);
+      mockGetEnabledPluginManifests.mockReturnValue(new Map([['my-stdio-mcp', stdioManifest]]));
+      mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig({ plugins: ['my-stdio-mcp'] }));
+
+      const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
+
+      // Gateway NOT configured → should mark as client
+      vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(false);
+      await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
+      let executorMap = mockCreateOperation.mock.calls[0][0].toolSet.executorMap;
+      expect(executorMap['my-stdio-mcp']).toBe('client');
+
+      // Gateway configured → should NOT mark as client
+      mockCreateOperation.mockClear();
+      vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(true);
+      mockQueryDeviceList.mockResolvedValue([
+        { deviceId: 'dev-1', deviceName: 'PC', platform: 'win32' },
+      ]);
+      await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
+      executorMap = mockCreateOperation.mock.calls[0][0].toolSet.executorMap;
+      expect(executorMap['my-stdio-mcp']).toBeUndefined();
+    });
+  });
+
+  describe('DEVICE_GATEWAY routing for local-system and stdio MCP', () => {
+    it('keeps executor unset for local-system when DEVICE_GATEWAY is configured', async () => {
+      // Desktop, web, and IM callers all share this path: tools route via the
+      // Remote Device proxy to the device registered with the gateway, never
+      // back to the caller. (The Phase 6.4 clientRuntime=desktop
+      // short-circuit that bypassed this gate was removed.)
+      const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
+      vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(true);
+      mockQueryDeviceList.mockResolvedValue([
+        { deviceId: 'dev-1', deviceName: 'Remote VM', platform: 'linux' },
+      ]);
+
+      mockGetEnabledPluginManifests.mockReturnValue(
+        new Map([[LocalSystemManifest.identifier, LocalSystemManifest]]),
+      );
+      mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig());
+
+      await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
+
+      const executorMap = mockCreateOperation.mock.calls[0][0].toolSet.executorMap;
+      expect(executorMap[LocalSystemManifest.identifier]).toBeUndefined();
+    });
+
+    it('keeps executor unset for stdio MCP when DEVICE_GATEWAY is configured', async () => {
+      const stdioPlugin = {
+        customParams: { mcp: { type: 'stdio' } },
+        identifier: 'my-stdio-mcp',
+      } as any;
+      const stdioManifest = {
+        api: [{ description: 't', name: 'a', parameters: {} }],
+        identifier: 'my-stdio-mcp',
+        meta: { title: 'Stdio' },
+      };
+
+      const { deviceProxy } = await import('@/server/services/toolExecution/deviceProxy');
+      vi.spyOn(deviceProxy, 'isConfigured', 'get').mockReturnValue(true);
+      mockQueryDeviceList.mockResolvedValue([
+        { deviceId: 'dev-1', deviceName: 'Remote VM', platform: 'linux' },
+      ]);
+
+      mockPluginQuery.mockResolvedValue([stdioPlugin]);
+      mockGetEnabledPluginManifests.mockReturnValue(new Map([['my-stdio-mcp', stdioManifest]]));
+      mockGetAgentConfig.mockResolvedValue(createBaseAgentConfig({ plugins: ['my-stdio-mcp'] }));
+
+      await service.execAgent({ agentId: 'agent-1', prompt: 'Hello' });
+
+      const executorMap = mockCreateOperation.mock.calls[0][0].toolSet.executorMap;
+      expect(executorMap['my-stdio-mcp']).toBeUndefined();
     });
   });
 
@@ -294,8 +422,8 @@ describe('AiAgentService.execAgent - device tool pipeline (LOBE-5636)', () => {
       const manifestMap = callArgs.toolSet.manifestMap;
 
       expect(manifestMap['test-tool']).toBe(mockManifest);
-      // No extra manifests added manually
-      expect(Object.keys(manifestMap)).toEqual(['test-tool']);
+      // manifestMap also includes discoverable builtin tools for activator discovery
+      expect(Object.keys(manifestMap)).toContain('test-tool');
     });
   });
 });

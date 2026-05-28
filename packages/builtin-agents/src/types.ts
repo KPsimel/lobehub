@@ -11,6 +11,9 @@ export const BUILTIN_AGENT_SLUGS = {
   groupSupervisor: 'group-supervisor',
   inbox: 'inbox',
   pageAgent: 'page-agent',
+  selfIteration: 'self-iteration',
+  taskAgent: 'task-agent',
+  webOnboarding: 'web-onboarding',
 } as const;
 
 export type BuiltinAgentSlug = (typeof BUILTIN_AGENT_SLUGS)[keyof typeof BUILTIN_AGENT_SLUGS];
@@ -50,6 +53,9 @@ export interface RuntimeContext {
 
   /** Context for GroupSupervisor */
   groupSupervisorContext?: GroupSupervisorContext;
+
+  /** Whether running in development mode */
+  isDev?: boolean;
 
   /** Current model being used */
   model?: string;

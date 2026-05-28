@@ -1,5 +1,6 @@
 import { Button, DropdownMenu, Flexbox, Icon, stopPropagation } from '@lobehub/ui';
-import { App, Space } from 'antd';
+import { confirmModal } from '@lobehub/ui/base-ui';
+import { Space } from 'antd';
 import { MoreHorizontalIcon, Trash2 } from 'lucide-react';
 import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -10,7 +11,7 @@ import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
 import { useServerConfigStore } from '@/store/serverConfig';
 import { pluginHelpers, useToolStore } from '@/store/tool';
-import { pluginSelectors, pluginStoreSelectors } from '@/store/tool/selectors';
+import { mcpStoreSelectors, pluginSelectors } from '@/store/tool/selectors';
 import { type LobeToolType } from '@/types/tool/tool';
 
 import EditCustomPlugin from './EditCustomPlugin';
@@ -23,15 +24,12 @@ interface ActionsProps {
 
 const Actions = memo<ActionsProps>(({ identifier, type, isMCP }) => {
   const mobile = useServerConfigStore((s) => s.isMobile);
-  const [installed, installing, installPlugin, unInstallPlugin, installMCPPlugin] = useToolStore(
-    (s) => [
-      pluginSelectors.isPluginInstalled(identifier)(s),
-      pluginStoreSelectors.isPluginInstallLoading(identifier)(s),
-      s.installPlugin,
-      s.uninstallPlugin,
-      s.installMCPPlugin,
-    ],
-  );
+  const [installed, installing, unInstallPlugin, installMCPPlugin] = useToolStore((s) => [
+    pluginSelectors.isPluginInstalled(identifier)(s),
+    mcpStoreSelectors.isPluginInstallLoading(identifier)(s),
+    s.uninstallCustomPlugin,
+    s.installMCPPlugin,
+  ]);
 
   const isCustomPlugin = type === 'customPlugin';
   const { t } = useTranslation('plugin');
@@ -41,7 +39,6 @@ const Actions = memo<ActionsProps>(({ identifier, type, isMCP }) => {
     s.togglePlugin,
     agentSelectors.currentAgentPlugins(s).includes(identifier),
   ]);
-  const { modal } = App.useApp();
   const hasSettings = pluginHelpers.isSettingSchemaNonEmpty(plugin?.settings);
 
   const [showModal, setModal] = useState(false);
@@ -88,8 +85,7 @@ const Actions = memo<ActionsProps>(({ identifier, type, isMCP }) => {
                   key: 'uninstall',
                   label: t('store.actions.uninstall'),
                   onClick: () => {
-                    modal.confirm({
-                      centered: true,
+                    confirmModal({
                       okButtonProps: { danger: true },
                       onOk: async () => {
                         // If plugin is enabled in current agent, disable it first
@@ -99,7 +95,6 @@ const Actions = memo<ActionsProps>(({ identifier, type, isMCP }) => {
                         await unInstallPlugin(identifier);
                       },
                       title: t('store.actions.confirmUninstall'),
-                      type: 'error',
                     });
                   },
                 },
@@ -115,9 +110,6 @@ const Actions = memo<ActionsProps>(({ identifier, type, isMCP }) => {
             onClick={async () => {
               if (isMCP) {
                 await installMCPPlugin(identifier);
-                await togglePlugin(identifier);
-              } else {
-                await installPlugin(identifier);
                 await togglePlugin(identifier);
               }
             }}

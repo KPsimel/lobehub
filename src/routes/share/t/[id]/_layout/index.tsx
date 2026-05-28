@@ -10,6 +10,8 @@ import { Link, Outlet } from 'react-router-dom';
 
 import { ProductLogo } from '@/components/Branding';
 import Loading from '@/components/Loading/BrandTextLoading';
+import { RouteMetaBridge } from '@/features/RouteMeta';
+import { trackLoginOrSignupClicked } from '@/features/User/UserLoginOrSignup/trackLoginOrSignupClicked';
 import { useIsDark } from '@/hooks/useIsDark';
 import { useUserStore } from '@/store/user';
 import { authSelectors } from '@/store/user/slices/auth/selectors';
@@ -25,6 +27,7 @@ const ShareTopicLayout = memo<PropsWithChildren>(({ children }) => {
 
   return (
     <Flexbox className={styles.outerContainer} height={'100%'} padding={8} width={'100%'}>
+      <RouteMetaBridge />
       <Flexbox
         className={cx(isDarkMode ? styles.innerContainerDark : styles.innerContainerLight)}
         height={'100%'}
@@ -44,7 +47,18 @@ const ShareTopicLayout = memo<PropsWithChildren>(({ children }) => {
                 <ProductLogo size={32} />
               </Link>
             ) : (
-              <NextLink href="/signin" style={{ color: 'inherit' }}>
+              <NextLink
+                href="/signin"
+                style={{ color: 'inherit' }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void trackLoginOrSignupClicked({ spm: 'share.logo_to_signin.click' }).finally(
+                    () => {
+                      window.location.href = '/signin';
+                    },
+                  );
+                }}
+              >
                 <ProductLogo size={32} />
               </NextLink>
             )}

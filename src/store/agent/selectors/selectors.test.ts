@@ -2,6 +2,7 @@ import { DEFAULT_PROVIDER } from '@lobechat/business-const';
 import {
   DEFAULT_AGENT_CONFIG,
   DEFAULT_AVATAR,
+  DEFAULT_INBOX_AVATAR,
   DEFAULT_MODEL,
   DEFAUTT_AGENT_TTS_CONFIG,
   INBOX_SESSION_ID,
@@ -136,6 +137,18 @@ describe('agentSelectors', () => {
 
       expect(meta.avatar).toBe(DEFAULT_AVATAR);
     });
+
+    it('should return inbox avatar fallback for inbox agent with no custom avatar', () => {
+      const state = createState({
+        activeAgentId: 'inbox-agent',
+        agentMap: { 'inbox-agent': {} },
+        builtinAgentIdMap: { [INBOX_SESSION_ID]: 'inbox-agent' },
+      });
+
+      const meta = agentSelectors.currentAgentMeta(state);
+
+      expect(meta.avatar).toBe(DEFAULT_INBOX_AVATAR);
+    });
   });
 
   describe('getAgentMetaById', () => {
@@ -160,6 +173,17 @@ describe('agentSelectors', () => {
       const meta = agentSelectors.getAgentMetaById('non-existent')(state);
 
       expect(meta).toEqual({});
+    });
+
+    it('should return inbox avatar fallback for inbox agent with no custom avatar', () => {
+      const state = createState({
+        agentMap: { 'inbox-agent': {} },
+        builtinAgentIdMap: { [INBOX_SESSION_ID]: 'inbox-agent' },
+      });
+
+      const meta = agentSelectors.getAgentMetaById('inbox-agent')(state);
+
+      expect(meta.avatar).toBe(DEFAULT_INBOX_AVATAR);
     });
   });
 
@@ -333,6 +357,50 @@ describe('agentSelectors', () => {
       });
 
       expect(agentSelectors.isAgentConfigLoading(state)).toBe(false);
+    });
+  });
+
+  describe('canCurrentAgentPublishToCommunity', () => {
+    it('should allow publishing normal agents', () => {
+      const state = createState({
+        activeAgentId: 'agent-1',
+        agentMap: { 'agent-1': { id: 'agent-1' } },
+      });
+
+      expect(agentSelectors.canCurrentAgentPublishToCommunity(state)).toBe(true);
+    });
+
+    it('should prevent publishing local heterogeneous agents', () => {
+      const state = createState({
+        activeAgentId: 'agent-1',
+        agentMap: {
+          'agent-1': {
+            agencyConfig: {
+              heterogeneousProvider: { command: 'codex', type: 'codex' },
+            },
+            id: 'agent-1',
+          },
+        },
+      });
+
+      expect(agentSelectors.canCurrentAgentPublishToCommunity(state)).toBe(false);
+    });
+
+    it('should prevent publishing platform agents', () => {
+      const state = createState({
+        activeAgentId: 'agent-1',
+        agentMap: {
+          'agent-1': {
+            agencyConfig: {
+              boundDeviceId: 'device-1',
+              heterogeneousProvider: { type: 'openclaw' },
+            },
+            id: 'agent-1',
+          },
+        },
+      });
+
+      expect(agentSelectors.canCurrentAgentPublishToCommunity(state)).toBe(false);
     });
   });
 

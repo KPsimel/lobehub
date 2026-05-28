@@ -11,8 +11,8 @@ import {
 
 import { DiscoverService } from '../discover';
 import { type MCPService } from '../mcp';
-import { type PluginGatewayService } from '../pluginGateway';
 import { type BuiltinToolsExecutor } from './builtin';
+import { classifyToolError } from './errorClassification';
 import {
   type ToolExecutionContext,
   type ToolExecutionResult,
@@ -24,22 +24,46 @@ const log = debug('lobe-server:tool-execution-service');
 interface ToolExecutionServiceDeps {
   builtinToolsExecutor: BuiltinToolsExecutor;
   mcpService: MCPService;
-  pluginGatewayService: PluginGatewayService;
 }
+
+const normalizeExecutionError = (error: unknown, fallbackMessage: string) => {
+  const normalized = classifyToolError(error || fallbackMessage);
+  const message = fallbackMessage || normalized.message;
+
+  if (error && typeof error === 'object') {
+    if (error instanceof Error) {
+      return {
+        code: normalized.code,
+        kind: normalized.kind,
+        message: error.message || message,
+        name: error.name,
+      };
+    }
+
+    const plainError = error as Record<string, unknown>;
+
+    return {
+      ...plainError,
+      code: (plainError.code as string | undefined) || normalized.code,
+      kind: normalized.kind,
+      message: (plainError.message as string | undefined) || message,
+    };
+  }
+
+  if (typeof error === 'string') {
+    return { code: normalized.code, kind: normalized.kind, message: error };
+  }
+
+  return { code: normalized.code, kind: normalized.kind, message };
+};
 
 export class ToolExecutionService {
   private builtinToolsExecutor: BuiltinToolsExecutor;
   private mcpService: MCPService;
-  private pluginGatewayService: PluginGatewayService;
 
-  constructor({
-    mcpService,
-    pluginGatewayService,
-    builtinToolsExecutor,
-  }: ToolExecutionServiceDeps) {
+  constructor({ mcpService, builtinToolsExecutor }: ToolExecutionServiceDeps) {
     this.builtinToolsExecutor = builtinToolsExecutor;
     this.mcpService = mcpService;
-    this.pluginGatewayService = pluginGatewayService;
   }
 
   async executeTool(
@@ -55,19 +79,14 @@ export class ToolExecutionService {
       const typeStr = type as string;
       let data: ToolExecutionResult;
       switch (typeStr) {
-        case 'builtin': {
-          data = await this.builtinToolsExecutor.execute(payload, context);
-          break;
-        }
-
         case 'mcp': {
           data = await this.executeMCPTool(payload, context);
           break;
         }
 
+        case 'builtin':
         default: {
-          data = await this.pluginGatewayService.execute(payload, context);
-
+          data = await this.builtinToolsExecutor.execute(payload, context);
           break;
         }
       }
@@ -76,7 +95,9 @@ export class ToolExecutionService {
 
       // Truncate result content to prevent context overflow
       // Use agent-specific config if provided, otherwise use default
-      const truncatedContent = truncateToolResult(data.content, context.toolResultMaxLength);
+      const truncatedContent = context.skipResultTruncation
+        ? data.content
+        : truncateToolResult(data.content, context.toolResultMaxLength);
 
       // Log if content was truncated
       if (truncatedContent !== data.content) {
@@ -89,6 +110,15 @@ export class ToolExecutionService {
           truncatedContent.length,
           maxLength,
         );
+      }
+
+      if (!data.success) {
+        return {
+          ...data,
+          content: truncatedContent,
+          error: normalizeExecutionError(data.error, data.content),
+          executionTime,
+        };
       }
 
       return {
@@ -104,10 +134,8 @@ export class ToolExecutionService {
       const errorMessage = (error as Error).message;
 
       return {
-        content: truncateToolResult(errorMessage),
-        error: {
-          message: errorMessage,
-        },
+        content: context.skipResultTruncation ? errorMessage : truncateToolResult(errorMessage),
+        error: normalizeExecutionError(error, errorMessage),
         executionTime,
         success: false,
       };

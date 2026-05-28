@@ -1,5 +1,5 @@
 import type { MenuItemConstructorOptions } from 'electron';
-import { app, clipboard, dialog, Menu, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, Menu, shell } from 'electron';
 
 import { isDev } from '@/const/env';
 
@@ -64,6 +64,15 @@ export class LinuxMenu extends BaseMenuPlatform implements IMenuPlatform {
             },
             label: t('file.newTopic'),
           },
+          {
+            accelerator: 'Ctrl+T',
+            click: () => {
+              const mainWindow = this.app.browserManager.getMainWindow();
+              mainWindow.show();
+              mainWindow.broadcast('createNewTab');
+            },
+            label: t('file.newTab'),
+          },
           { type: 'separator' },
           {
             accelerator: 'Alt+Ctrl+A',
@@ -94,7 +103,11 @@ export class LinuxMenu extends BaseMenuPlatform implements IMenuPlatform {
           },
           { type: 'separator' },
           {
-            click: () => this.app.browserManager.retrieveByIdentifier('settings').show(),
+            click: async () => {
+              const mainWindow = this.app.browserManager.getMainWindow();
+              mainWindow.show();
+              mainWindow.broadcast('navigate', { path: '/settings' });
+            },
             label: t('file.preferences'),
           },
           {
@@ -104,7 +117,20 @@ export class LinuxMenu extends BaseMenuPlatform implements IMenuPlatform {
             label: t('common.checkUpdates'),
           },
           { type: 'separator' },
-          { label: t('window.close'), role: 'close' },
+          {
+            accelerator: 'CmdOrCtrl+W',
+            click: () => {
+              const focused = BrowserWindow.getFocusedWindow();
+              if (!focused) return;
+              const mainWindow = this.app.browserManager.getMainWindow();
+              if (focused === mainWindow.browserWindow) {
+                mainWindow.broadcast('closeCurrentTabOrWindow');
+              } else {
+                focused.close();
+              }
+            },
+            label: t('window.close'),
+          },
           { label: t('window.minimize'), role: 'minimize' },
           { type: 'separator' },
           { label: t('file.quit'), role: 'quit' },
@@ -128,9 +154,9 @@ export class LinuxMenu extends BaseMenuPlatform implements IMenuPlatform {
         submenu: [
           { accelerator: 'F12', label: t('dev.devTools'), role: 'toggleDevTools' },
           { type: 'separator' },
-          { label: t('view.resetZoom'), role: 'resetZoom' },
-          { label: t('view.zoomIn'), role: 'zoomIn' },
-          { label: t('view.zoomOut'), role: 'zoomOut' },
+          this.buildZoomMenuItem('reset', t('view.resetZoom'), 'CmdOrCtrl+0'),
+          ...this.buildZoomMenuItems('in', t('view.zoomIn'), 'CmdOrCtrl+=', ['CmdOrCtrl+Plus']),
+          this.buildZoomMenuItem('out', t('view.zoomOut'), 'CmdOrCtrl+-'),
           { type: 'separator' },
           { label: t('view.toggleFullscreen'), role: 'togglefullscreen' },
         ],
@@ -433,10 +459,22 @@ export class LinuxMenu extends BaseMenuPlatform implements IMenuPlatform {
         click: () => this.app.browserManager.showMainWindow(),
         label: t('tray.open', { appName }),
       },
+      {
+        click: () => this.app.screenCaptureManager.startSession(),
+        label: t('tray.openMiniToolbar'),
+      },
+      {
+        click: () => this.app.browserManager.openQuickChatPopup(),
+        label: t('tray.quickChat'),
+      },
       { type: 'separator' },
       {
-        click: () => this.app.browserManager.retrieveByIdentifier('settings').show(),
-        label: t('file.preferences'),
+        click: async () => {
+          const mainWindow = this.app.browserManager.getMainWindow();
+          mainWindow.show();
+          mainWindow.broadcast('navigate', { path: '/settings' });
+        },
+        label: t('tray.settings'),
       },
       { type: 'separator' },
       { label: t('tray.quit'), role: 'quit' },

@@ -1,4 +1,5 @@
 import { copyToClipboard, createRawModal, Icon } from '@lobehub/ui';
+import { confirmModal } from '@lobehub/ui/base-ui';
 import { App } from 'antd';
 import { type ItemType } from 'antd/es/menu/interface';
 import {
@@ -15,12 +16,13 @@ import { useTranslation } from 'react-i18next';
 import { shallow } from 'zustand/shallow';
 
 import RepoIcon from '@/components/LibIcon';
-import { clearTreeFolderCache } from '@/features/ResourceManager/components/LibraryHierarchy';
+import { useKnowledgeBaseListContext } from '@/features/ResourceManager/components/KnowledgeBaseListProvider';
 import { PAGE_FILE_TYPE } from '@/features/ResourceManager/constants';
 import { useAppOrigin } from '@/hooks/useAppOrigin';
 import { documentService } from '@/services/document';
 import { useFileStore } from '@/store/file';
 import { useKnowledgeBaseStore } from '@/store/library';
+import { useTreeStore } from '@/store/tree';
 import { downloadFile } from '@/utils/client/downloadFile';
 
 import MoveToFolderModal from '../MoveToFolderModal';
@@ -53,7 +55,7 @@ export const useFileItemDropdown = ({
   onRenameStart,
 }: UseFileItemDropdownParams): UseFileItemDropdownReturn => {
   const { t } = useTranslation(['components', 'common', 'knowledgeBase']);
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const appOrigin = useAppOrigin();
 
   const { deleteResource, moveResource, refreshFileList } = useFileStore(
@@ -64,17 +66,11 @@ export const useFileItemDropdown = ({
     }),
     shallow,
   );
-  const [removeFilesFromKnowledgeBase, addFilesToKnowledgeBase, useFetchKnowledgeBaseList] =
-    useKnowledgeBaseStore((s) => [
-      s.removeFilesFromKnowledgeBase,
-      s.addFilesToKnowledgeBase,
-      s.useFetchKnowledgeBaseList,
-    ]);
-
-  // Fetch knowledge bases - SWR caches this across all dropdown instances
-  // Only the first call fetches from server, subsequent calls use cache
-  // The expensive menu computation is deferred until dropdown opens (menuItems is a function)
-  const { data: libraries } = useFetchKnowledgeBaseList();
+  const [removeFilesFromKnowledgeBase, addFilesToKnowledgeBase] = useKnowledgeBaseStore((s) => [
+    s.removeFilesFromKnowledgeBase,
+    s.addFilesToKnowledgeBase,
+  ]);
+  const libraries = useKnowledgeBaseListContext();
 
   const isInLibrary = !!libraryId;
   const isFolder = fileType === 'custom/folder';
@@ -94,7 +90,7 @@ export const useFileItemDropdown = ({
 
   const menuItems = useCallback(() => {
     // Filter out current knowledge base and create submenu items
-    const availableKnowledgeBases = (libraries || []).filter((kb) => kb.id !== libraryId);
+    const availableKnowledgeBases = libraries.filter((kb) => kb.id !== libraryId);
 
     // Submenu for adding files to a library (used when NOT in a library)
     const addToKnowledgeBaseSubmenu: ItemType[] = availableKnowledgeBases.map((kb) => ({
@@ -173,7 +169,7 @@ export const useFileItemDropdown = ({
               onClick: async ({ domEvent }) => {
                 domEvent.stopPropagation();
 
-                modal.confirm({
+                confirmModal({
                   okButtonProps: {
                     danger: true,
                   },
@@ -306,20 +302,21 @@ export const useFileItemDropdown = ({
           label: t('delete', { ns: 'common' }),
           onClick: async ({ domEvent }) => {
             domEvent.stopPropagation();
-            modal.confirm({
+            confirmModal({
               content: isFolder
                 ? t('FileManager.actions.confirmDeleteFolder')
                 : t('FileManager.actions.confirmDelete'),
               okButtonProps: { danger: true },
+              title: t('delete', { ns: 'common' }),
               onOk: async () => {
                 // Use optimistic delete - instant UI update, sync in background
                 await deleteResource(id);
 
-                // Ensure tree caches stay in sync with explorer
-                if (libraryId) {
-                  await clearTreeFolderCache(libraryId);
-                }
-                await refreshFileList();
+                // Revalidate tree for the parent folder
+                const { queryParams } = useFileStore.getState();
+                const parentId = queryParams?.parentId ?? '';
+                void useTreeStore.getState().revalidate(parentId);
+                await refreshFileList({ revalidateResources: false });
 
                 message.success(t('FileManager.actions.deleteSuccess'));
               },
@@ -330,7 +327,7 @@ export const useFileItemDropdown = ({
     ).filter(Boolean);
   }, [
     addFilesToKnowledgeBase,
-    clearTreeFolderCache,
+    appOrigin,
     deleteResource,
     filename,
     id,
@@ -340,7 +337,6 @@ export const useFileItemDropdown = ({
     libraries,
     libraryId,
     message,
-    modal,
     moveResource,
     onRenameStart,
     refreshFileList,

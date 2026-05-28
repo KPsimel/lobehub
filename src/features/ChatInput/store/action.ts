@@ -1,5 +1,6 @@
 import { type StateCreator } from 'zustand/vanilla';
 
+import { removeDraft } from '../draftStorage';
 import { type PublicState, type State } from './initialState';
 import { initialState } from './initialState';
 
@@ -34,6 +35,7 @@ export const store: CreateStore = (publicState) => (set, get) => ({
   handleSendButton: () => {
     const editor = get().editor;
     if (!editor) return;
+    if (get().sendButtonProps?.disabled) return;
 
     get().onSend?.({
       clearContent: () => editor?.cleanDocument(),
@@ -41,6 +43,13 @@ export const store: CreateStore = (publicState) => (set, get) => ({
       getEditorData: get().getJSONState,
       getMarkdownContent: get().getMarkdownContent,
     });
+
+    const { draftKey } = get();
+    if (draftKey) removeDraft(draftKey);
+
+    if (get().expand) {
+      set({ _savedEditorState: undefined, expand: false });
+    }
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         editor.focus();
@@ -59,7 +68,9 @@ export const store: CreateStore = (publicState) => (set, get) => ({
   },
 
   setExpand: (expand) => {
-    set({ expand });
+    const editor = get().editor;
+    const _savedEditorState = editor?.getDocument('json') as Record<string, any> | undefined;
+    set({ _savedEditorState, expand });
   },
 
   setJSONState: (content) => {
